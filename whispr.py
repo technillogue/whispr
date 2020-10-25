@@ -32,7 +32,7 @@ Event = TypedDict(
         "sender_name": str,
         "text": str,
         "media": List[str],
-        "ts": str,
+        "ts": int,
         "groupID": str,
     },
 )
@@ -78,7 +78,7 @@ class WhispererBase:
         return self
 
     def __exit__(self, _: Any, value: Any, traceback: Any) -> None:
-        json.dump([self.user_names, self.followers], open("users.json", "w"))
+        json.dump([dict(self.user_names), self.followers], open("users.json", "w"))
 
     def followup(self, number: str, message: str, hook: Callable) -> None:
         if not self.state[number]:
@@ -124,7 +124,7 @@ class WhispererBase:
 
     def receive(self, *args: Union[str, List[str]]) -> None:
         event = cast(
-            Event, dict(zip(["sender", "ts", "groupID", "text", "media"], args))
+            Event, dict(zip(["ts", "sender", "groupID", "text", "media"], args))
         )
         self.log.append(event)
         sender: str = event["sender"]
@@ -159,7 +159,7 @@ class WhispererBase:
             command, *tokens = text[1:].split(" ")
             event = cast(FullEvent, event)
             event["tokens"] = tokens
-            event["arg1"] = tokens[0]
+            event["arg1"] = tokens[0] if tokens else ""
             event["line"] = " ".join(tokens)
             event["command"] = command
             try:
@@ -190,7 +190,7 @@ class WhispererBase:
         else:
             return "documented commands: " + ", ".join(
                 name[3:]
-                for name, value in self.__dict__
+                for name, value in self.__dict__.items()
                 if name.startswith("do_") and value.__doc__
             )
 

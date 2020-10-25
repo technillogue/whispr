@@ -79,12 +79,17 @@ class Whisperer(WhispererBase):
         return f"other users will now see you as {arguments[0]}"
 
     def do_follow(self, sender, arguments, attachments) -> str:
-        """/follow [number] [name]. follow someone, giving them a name"""
+        """/follow [number or name] [name]. follow someone, giving them a name"""
         try:
-            number, name = arguments
+            identifier, name =  arguments
         except ValueError:
             number = arguments[0]
             name = number
+        if identifier in self.user_names.values():
+            name = identifier
+            number = next(number for number, name in self.user_names.items() if name = identifier)
+        else:
+            number = identifier
         if not (number.startswith("+") and number[1:].isnumeric()):
             return f"{number} doesn't look a number. did you include the country code?"
         if number not in self.user_names:
@@ -101,11 +106,18 @@ class Whisperer(WhispererBase):
             return ", ".join(self.followers[sender])
         return "you don't have any followers"
 
+    def do_following(self, sender, arguments, attachments) -> str:
+        """/following. list who you follow"""
+        following = ", ".join(self.user_names[number] for number, followers in self.followers.items() if sender in followers)
+        if not following:
+            return "you aren't following anyone"
+        return following
+
     def do_default(self, sender, arguments, attachments) -> None:
         """send a message to your followers"""
         name = self.user_names[sender]
         for follower in self.followers[sender]:
-            self.send(follower, f"{name}: {message}", attachments)
+            self.send(follower, f"{name}: {' '.join(arguments)}", attachments)
 
 
 

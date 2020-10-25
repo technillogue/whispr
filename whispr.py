@@ -1,46 +1,76 @@
+from typing import Optional, Any
 from itertools import permutations
 import json
 from pydbus import SessionBus
 from gi.repository import GLib
 
 
-user_numbers = json.load(open("users.json"))
+class WhispererBase:
+    def __init__(self) -> None:
+        bus = SessionBus()
+        self.loop = GLib.MainLoop()
+        self.signal = bus.get("org.asamk.Signal")
+        self.log = []
 
-user_names = {number: name for name, number in user_numbers.items()}
+    def __enter__(self) -> "WhispererBase":
+        data = json.load(open("users.json"))
+        if isinstance(data, list):
+            self.user_names, self.followers = data
+        else:
+            self.user_names = data
+            self.followers = dict(permutations(self.user_names))
+        return self
 
-followers = {u1: u2 for u1, u2 in permutations(user_numbers.values())}
+    def __exit__(self, _: Any, value: Any, traceback: Any) -> None:
+        json.dump([self.user_names, self.followers], open("users.json", "w"))
 
-def do_follow(): pass
+    def send(self, recipient: str, message: str, attachments=Optional[list]):
+        if attachments is None:
+            attachments = []
+        self.signal.sendMessage(message, attachments, [recipient])
 
-def do_invite(): pass
+    def receive(
+        self, timestamp, sender: str, groupID, message: str, attachments: list
+    ) -> None:
+        self.log.append((timestamp, sender, groupID, message, attachments))
+        print("Message", message, "from ", sender)
+        if message.startswith("/"):
+            command, argument = message[1:].split(maxsplit=1)
+            try:
+                resp = getattr(self, f"do_{command}")(
+                    sender, argument, attachments
+                )
+            except AttributeError:
+                resp = f"no such command {command}"
+        else:
+            resp = self.do_default(sender, message, attachments)
+        if resp is not None:
+            self.send(sender, resp)
 
-def do_response(): pass
+    def do_default(self, sender, message, attachments) -> None:
+        pass
 
-def do_unfollow(): pass
+    def do_help(self, sender, argument, attachments) -> str:
+        if argument:
+            try:
+                doc = getattr(self, f"do_{argument}").__doc__
+                if doc:
+                    return doc
+                return f"{argument} isn't documented, sorry :("
+            except AttributeError:
+                return f"no such command {argument}"
 
-def do_block(): pass
-
-def do_list(): pass
-
-
-commands = {"follow": do_follow}
-
-def msgRcv (timestamp, source, groupID, message, attachments):
-    messages.append((timestamp, source, groupID, message, attachments))
-    print ("Message", message, "from ", source)
-#    if message.startswith("/"):
- #       commands[message[1:].split()[0]](source, message)
-    name = usernames[source]
-    for follower in followers[source]:
-       signal.sendMessage(f"{name}: {message}", attachments, [follower]) 
-
-    return
+    def run(self) -> None:
+        self.signal.onMessageReceived = self.receive
+        self.loop.run()
 
 
-bus = SessionBus()
-loop = GLib.MainLoop()
+class Whisperer(WhispererBase):
+    def do_echo(self, sender, message, attachments) -> str:
+        return message
 
-signal = bus.get('org.asamk.Signal')
+    do_default = do_echo
 
-signal.onMessageReceived = msgRcv
-loop.run()
+
+with Whisperer() as whisperer:
+    whisperer.run()

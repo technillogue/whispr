@@ -24,7 +24,7 @@ class WhispererBase:
     def __exit__(self, _: Any, value: Any, traceback: Any) -> None:
         json.dump([self.user_names, self.followers], open("users.json", "w"))
 
-    def send(self, recipient: str, message: str, attachments=Optional[list]):
+    def send(self, recipient: str, message: str, attachments:Optional[list]=None) -> None:
         if attachments is None:
             attachments = []
         self.signal.sendMessage(message, attachments, [recipient])

@@ -11,6 +11,8 @@ class WhispererBase:
         self.loop = GLib.MainLoop()
         self.signal = bus.get("org.asamk.Signal")
         self.log = []
+        self.state = {}
+        # {number: callback?}
 
     def __enter__(self) -> "WhispererBase":
         data = json.load(open("users.json"))
@@ -35,10 +37,10 @@ class WhispererBase:
         self.log.append((timestamp, sender, groupID, message, attachments))
         print("Message", message, "from ", sender)
         if message.startswith("/"):
-            command, argument = message[1:].split(maxsplit=1)
+            command, *arguments = message[1:].split()
             try:
                 resp = getattr(self, f"do_{command}")(
-                    sender, argument, attachments
+                    sender, arguments, attachments
                 )
             except AttributeError:
                 resp = f"no such command {command}"
@@ -47,10 +49,11 @@ class WhispererBase:
         if resp is not None:
             self.send(sender, resp)
 
-    def do_default(self, sender, message, attachments) -> None:
+    def do_default(self, sender, arguments, attachments) -> None:
         pass
 
-    def do_help(self, sender, argument, attachments) -> str:
+    def do_help(self, sender, arguments, attachments) -> str:
+        argument = arguments[0]
         if argument:
             try:
                 doc = getattr(self, f"do_{argument}").__doc__
@@ -66,10 +69,44 @@ class WhispererBase:
 
 
 class Whisperer(WhispererBase):
-    def do_echo(self, sender, message, attachments) -> str:
-        return message
+    def do_echo(self, sender, arguments, attachments) -> str:
+        """repeats what you say"""
+        return " ".join(arguments)
 
-    do_default = do_echo
+    def do_name(self, sender, arguments, attachments) -> str:
+        """/name [name]. set or change your name"""
+        self.user_names[sender] = arguments[0]
+        return f"other users will now see you as {arguments[0]}"
+
+    def do_follow(self, sender, arguments, attachments) -> str:
+        """/follow [number] [name]. follow someone, giving them a name"""
+        try:
+            number, name = arguments
+        except ValueError:
+            number = arguments[0]
+            name = number
+        if not (number.startswith("+") and number[1:].isnumeric()):
+            return f"{number} doesn't look a number. did you include the country code?"
+        if number not in self.user_names:
+            self.user_names[number] = name
+            self.followers[number] = [sender]
+            return f"followed {number}, named {name}"
+        self.followers[number].append(sender)
+        actual_name = self.user_names[number]
+        return f"followed {number}. they have a name, it's {actual_name}"
+
+    def do_followers(self, sender, arguments, attachments) -> str:
+        """/followers. list your followers"""
+        if sender in self.followers and self.followers[sender]:
+            return ", ".join(self.followers[sender])
+        return "you don't have any followers"
+
+    def do_default(self, sender, arguments, attachments) -> None:
+        """send a message to your followers"""
+        name = self.user_names[sender]
+        for follower in self.followers[sender]:
+            self.send(follower, f"{name}: {message}", attachments)
+
 
 
 with Whisperer() as whisperer:

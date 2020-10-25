@@ -1,3 +1,4 @@
+#!/usr/bin/python3
 from typing import (
     Optional,
     Any,
@@ -17,13 +18,6 @@ from bidict import bidict
 from pydbus import SessionBus
 from gi.repository import GLib
 
-
-# hi! X has followed you. text stop or y/n
-# you're following x
-# what would you like to be called?
-# -> call
-# message queue?
-# [invite msg, invite_response, name_msg, name_rsp]
 
 Event = TypedDict(
     "Event",
@@ -63,22 +57,26 @@ class WhispererBase:
     handles new users
     """
 
-    def __init__(self) -> None:
+    def __init__(self, fname: str = "users.json") -> None:
         bus = SessionBus()
+        self.fname = fname
         self.loop = GLib.MainLoop()
         self.signal = bus.get("org.asamk.Signal")
         self.log: List[Event] = []
         self.state: State = defaultdict(deque)
-        self.blocked: Set[str] = set()
 
     def __enter__(self) -> "WhispererBase":
-        user_names, self.followers = json.load(open("users.json"))
-        self.user_names = {} # tell pylint this is a dict
+        user_names, self.followers, blocked = json.load(open(self.fname))
+        self.user_names = {}  # tell pylint this is a dict
         self.user_names = bidict(user_names)
+        self.blocked: Set[str] = set(blocked)
         return self
 
     def __exit__(self, _: Any, value: Any, traceback: Any) -> None:
-        json.dump([dict(self.user_names), self.followers], open("users.json", "w"))
+        json.dump(
+            [dict(self.user_names), self.followers, list(self.blocked)],
+            open(self.fname, "w"),
+        )
 
     def followup(self, number: str, message: str, hook: Callable) -> None:
         if not self.state[number]:
@@ -106,7 +104,7 @@ class WhispererBase:
                 self.user_names[recipient] = recipient
                 self.send(
                     recipient,
-                    "welcome to whispr."
+                    "welcome to whispr. "
                     "text STOP or BLOCK to not receive messages",
                 )
                 self.signal.sendMessage(message, media, [recipient])
@@ -132,7 +130,7 @@ class WhispererBase:
         if text.lower() in ("stop", "block"):
             self.send(
                 sender,
-                "i'll stop sending texts."
+                "i'll stop messaging you. "
                 "text START or UNBLOCK to resume texts",
             )
             self.blocked.add(sender)
@@ -183,7 +181,7 @@ class WhispererBase:
             try:
                 doc = getattr(self, f"do_{argument}").__doc__
                 if doc:
-                    return dedent(doc)
+                    return dedent(doc).strip()
                 return f"{argument} isn't documented, sorry :("
             except AttributeError:
                 return f"no such command {argument}"
@@ -228,7 +226,8 @@ class Whisperer(WhispererBase):
                     "how would like to be called? "
                     "(text STOP or BLOCK to not receive messages again)"
                 ),
-            )
+            ) # this probably sends twice
+            # offer to follow back
             self.state[number].append(self.do_name)
             self.followers[number] = [sender]
             return f"followed {number}"
@@ -296,5 +295,6 @@ class Whisperer(WhispererBase):
         # maybe react to the message indicating it was sent
 
 
-with Whisperer() as whisperer:
-    whisperer.run()
+if __name__ == "__main__":
+    with Whisperer() as whisperer:
+        whisperer.run()

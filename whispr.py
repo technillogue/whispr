@@ -186,11 +186,12 @@ class WhispererBase:
             except AttributeError:
                 return f"no such command {argument}"
         else:
-            return "documented commands: " + ", ".join(
+            resp = "documented commands: " + ", ".join(
                 name[3:]
                 for name, value in self.__dict__.items()
                 if name.startswith("do_") and value.__doc__
-            )
+            ) # doesn't work?
+            return resp
 
     def run(self) -> None:
         self.signal.onMessageReceived = self.receive
@@ -202,8 +203,19 @@ def do_echo(event: FullEvent) -> str:
     return event["line"]
 
 
+class Animal:
+    def __init__(self, name):
+        self.name = name
+
+    def meow(self):
+        return "meow"
+
+cat = Animal("cat")
+
+
+
 class Whisperer(WhispererBase):
-    do_echo = do_echo
+    do_echo = staticmethod(do_echo)
 
     def do_follow(self, event: FullEvent) -> str:
         """/follow [number or name]. follow someone"""
@@ -214,8 +226,6 @@ class Whisperer(WhispererBase):
             number = event["arg1"]
         if not (number.startswith("+") and number[1:].isnumeric()):
             return f"{number} doesn't look a number. did you include the country code?"
-        if sender in self.followers[number]:
-            return f"you're already following {number}"
         if number not in self.user_names:
             name = self.user_names[sender]
             self.send(
@@ -231,6 +241,8 @@ class Whisperer(WhispererBase):
             self.state[number].append(self.do_name)
             self.followers[number] = [sender]
             return f"followed {number}"
+        if sender in self.followers[number]:
+            return f"you're already following {number}"
         self.followers[number].append(sender)
         return f"followed {number}, they're called {self.user_names[number]}"
 

@@ -56,19 +56,22 @@ class WhispererBase:
     it'll be called on the next message from that number
     handles new users
     """
+    get_bus = classmethod(SessionBus)
+    get_loop = classmethod(GLib.MainLoop)
 
     def __init__(self, fname: str = "users.json") -> None:
-        bus = SessionBus()
+        bus = self.get_bus()
         self.fname = fname
-        self.loop = GLib.MainLoop()
+        self.loop = self.get_loop()
         self.signal = bus.get("org.asamk.Signal")
         self.log: List[Event] = []
         self.state: State = defaultdict(deque)
 
     def __enter__(self) -> "WhispererBase":
-        user_names, self.followers, blocked = json.load(open(self.fname))
-        self.user_names = {}  # tell pylint this is a dict
+        user_names, followers, blocked = json.load(open(self.fname))
+        self.user_names = cast(bidict, {}) # tell pylint it's subscriptable
         self.user_names = bidict(user_names)
+        self.followers = defaultdict(list, followers)
         self.blocked: Set[str] = set(blocked)
         return self
 
@@ -120,7 +123,7 @@ class WhispererBase:
         self.user_names[event["sender"]] = name
         return f"other users will now see you as {name}"
 
-    def receive(self, *args: Union[str, List[str]]) -> None:
+    def receive(self, *args: Union[int, str, List[str]]) -> None:
         event = cast(
             Event, dict(zip(["ts", "sender", "groupID", "text", "media"], args))
         )
@@ -149,23 +152,23 @@ class WhispererBase:
         event["sender_name"] = sender_name
         print("Message", text, "from ", sender_name)
         if sender in self.state:
-            event = cast(FullEvent, event)
-            event["line"] = event["arg1"] = text
-            event["tokens"] = text.split(" ")
-            resp: Optional[str] = self.state[sender].popleft()(event)
+            full_event = cast(FullEvent, event)
+            full_event["line"] = full_event["arg1"] = text
+            full_event["tokens"] = text.split(" ")
+            resp: Optional[str] = self.state[sender].popleft()(full_event)
         elif text.startswith("/"):
             command, *tokens = text[1:].split(" ")
-            event = cast(FullEvent, event)
-            event["tokens"] = tokens
-            event["arg1"] = tokens[0] if tokens else ""
-            event["line"] = " ".join(tokens)
-            event["command"] = command
+            full_event = cast(FullEvent, event)
+            full_event["tokens"] = tokens
+            full_event["arg1"] = tokens[0] if tokens else ""
+            full_event["line"] = " ".join(tokens)
+            full_event["command"] = command
             try:
-                resp = getattr(self, f"do_{command}")(event)
+                resp = getattr(self, f"do_{command}")(full_event)
             except AttributeError:
                 resp = f"no such command {command}"
         else:
-            resp = self.do_default(event)  # type: ignore
+            resp = self.do_default(full_event)  # type: ignore
         if resp is not None:
             self.send(sender, resp)
 
@@ -190,7 +193,7 @@ class WhispererBase:
                 name[3:]
                 for name, value in self.__dict__.items()
                 if name.startswith("do_") and value.__doc__
-            ) # doesn't work?
+            )  # doesn't work?
             return resp
 
     def run(self) -> None:
@@ -201,17 +204,6 @@ class WhispererBase:
 def do_echo(event: FullEvent) -> str:
     """repeats what you say"""
     return event["line"]
-
-
-class Animal:
-    def __init__(self, name):
-        self.name = name
-
-    def meow(self):
-        return "meow"
-
-cat = Animal("cat")
-
 
 
 class Whisperer(WhispererBase):
@@ -226,25 +218,12 @@ class Whisperer(WhispererBase):
             number = event["arg1"]
         if not (number.startswith("+") and number[1:].isnumeric()):
             return f"{number} doesn't look a number. did you include the country code?"
-        if number not in self.user_names:
-            name = self.user_names[sender]
-            self.send(
-                number,
-                (
-                    "hi! this is whisprbot. "
-                    f"{name} has followed you. "
-                    "how would like to be called? "
-                    "(text STOP or BLOCK to not receive messages again)"
-                ),
-            ) # this probably sends twice
-            # offer to follow back
-            self.state[number].append(self.do_name)
-            self.followers[number] = [sender]
-            return f"followed {number}"
-        if sender in self.followers[number]:
-            return f"you're already following {number}"
-        self.followers[number].append(sender)
-        return f"followed {number}, they're called {self.user_names[number]}"
+        if sender not in self.followers[number]:
+            self.send(number, f"{event['sender_name']} has followed you")
+            self.followers[number].append(sender)
+            # offer to follow back?
+            return f"followed {event['arg1']}"
+        return f"you're already following {number}"
 
     def do_invite(self, event: FullEvent) -> str:
         """
@@ -298,7 +277,7 @@ class Whisperer(WhispererBase):
             return "you aren't following anyone"
         return following
 
-    def do_default(self, event: Event) -> None:
+    def do_default(self, event: FullEvent) -> None:
         """send a message to your followers"""
         sender = event["sender"]
         name = self.user_names[sender]

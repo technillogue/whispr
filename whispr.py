@@ -18,7 +18,9 @@ from bidict import bidict
 from pydbus import SessionBus
 from gi.repository import GLib
 
-
+# maybe replace these with an actual class?
+# https://code.activestate.com/recipes/52308-the-simple-but-handy-collector-of-a-bunch-of-named
+# makes a compelling case for it being more pythonic
 Event = TypedDict(
     "Event",
     {
@@ -125,14 +127,13 @@ class WhispererBase:
         return f"other users will now see you as {name}"
 
     def receive(self, *args: Union[int, str, List[str]]) -> None:
+        event = cast(
+            Event, dict(zip(["ts", "sender", "groupID", "text", "media"], args)),
+        )
+        sender: str = event["sender"]
+        text: str = event["text"]
         try:
-            event = cast(
-                Event,
-                dict(zip(["ts", "sender", "groupID", "text", "media"], args)),
-            )
             self.log.append(event)
-            sender: str = event["sender"]
-            text: str = event["text"]
             if text.lower() in ("stop", "block"):
                 self.send(
                     sender,
@@ -224,10 +225,14 @@ class Whisperer(WhispererBase):
     def do_default(self, event: Union[FullEvent, Event]) -> None:
         """send a message to your followers"""
         sender = event["sender"]
-        name = self.user_names[sender]
-        for follower in self.followers[sender]:
-            self.send(follower, f"{name}: {event['text']}", event["media"])
-        # maybe react to the message indicating it was sent
+        if sender not in self.user_names:
+            self.send(sender, f"{event['text']} yourself")
+            # ensures they'll get a welcome message
+        else:
+            name = self.user_names[sender]
+            for follower in self.followers[sender]:
+                self.send(follower, f"{name}: {event['text']}", event["media"])
+            # ideally react to the message indicating it was sent
 
     do_echo = staticmethod(do_echo)
 
@@ -255,27 +260,31 @@ class Whisperer(WhispererBase):
             number = self.user_names.inverse[event["arg1"]]
         else:
             number = event["arg1"]
-        self.followup(
-            number,
-            f"{event['sender_name']} invited you to follow them on whispr. "
-            "text (y)es or (n)o to accept",
-            self.invite_respond(event["sender"]),
-        )
-        return f"invited {number}"
+        if number not in self.followers[event["sender"]]:
+            self.followup(
+                number,
+                f"{event['sender_name']} invited you to follow them on whispr. "
+                "text (y)es or (n)o to accept",
+                self.invite_respond(event["sender"]),
+            )
+            return f"invited {event['arg1']}"
+        return f"you're already following {event['arg1']}"
 
     def invite_respond(self, inviter: str) -> Callable:
+        inviter_name = self.user_names[inviter]
+
         def invited(event: FullEvent) -> str:
             response = event["text"].lower()
             if response in "yes":  # matches substrings!
                 self.followers[inviter].append(event["sender"])
-                return f"followed {inviter}"
+                return f"followed {inviter_name}"
             if response in "no":
-                return f"didn't follow {inviter}"
+                return f"didn't follow {inviter_name}"
             return (
                 "that didn't look like a response. "
-                f"not following {inviter} by default. if you do want to "
-                f"follow them, text /follow {inviter} or"
-                f"/follow {self.user_names[inviter]}"
+                f"not following {inviter_name} by default. if you do want to "
+                f"follow them, text `/follow {inviter}` or "
+                f"`/follow {inviter_name}`"
             )
 
         return invited
@@ -301,6 +310,7 @@ class Whisperer(WhispererBase):
             return "you aren't following anyone"
         return following
 
+    # maybe softblock/unfollow followers/following should reuse code somehow?
     def do_softblock(self, event: FullEvent) -> str:
         """/softblock [number or name]. removes someone from your followers"""
         if event["arg1"] in self.user_names.inverse:
@@ -311,6 +321,17 @@ class Whisperer(WhispererBase):
             return f"{event['arg1']} isn't following you"
         self.followers[event["sender"]].remove(number)
         return f"softblocked {event['arg1']}"
+
+    def do_unfollow(self, event: FullEvent) -> str:
+        """/unfollow [number or name]. unfollow someone"""
+        if event["arg1"] in self.user_names.inverse:
+            number = self.user_names.inverse[event["arg1"]]
+        else:
+            number = event["arg1"]
+        if event["sender"] not in self.followers[number]:
+            return f"you aren't following {event['arg1']}"
+        self.followers[number].remove(event["sender"])
+        return f"unfollowed {event['arg1']}"
 
 
 # dissappearing messages

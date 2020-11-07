@@ -53,7 +53,7 @@ class MockWhisperer(Whisperer):
         response to that number.
         """
         # this is assertion sugar, don't show it in tb
-        __tracebackhide__ = True # pylint: disable=unused-variable
+        __tracebackhide__ = True  # pylint: disable=unused-variable
         self.input(number, message)
         response = self.take_outbox_for(number)
         assert len(response) == 1
@@ -268,7 +268,7 @@ def test_softblock(wisp: MockWhisperer) -> None:
 def test_silly_error() -> None:
     wisp = MockWhisperer()
     wisp.user_names[alice] = "alice"
-    wisp.log = None # type: ignore
+    wisp.log = None  # type: ignore
     expected_error = "'NoneType' object has no attribute 'append'"
     with pytest.raises(AttributeError, match=expected_error):
         wisp.input(alice, "hi")

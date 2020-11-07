@@ -44,12 +44,3 @@ jobs:
       - name: Test with pytest
         env:
           run: poetry run pytest --cov . -n 2
-      - name: Pytest Coverage Commentator
-          # You may pin to the exact commit or the version.
-          # uses: coroo/pytest-coverage-commentator@bf2d76a0d38a8bbf7292aba469ae5285c5ea9660
-          uses: coroo/pytest-coverage-commentator@v1.0.2
-          with:
-            # Where to find the txt output of pytest-coverage
-            pytest-coverage: # default is pytest-coverage.txt
-            # GITHUB_TOKEN
-            token: # default is ${{ github.token }}

@@ -128,7 +128,8 @@ class WhispererBase:
 
     def receive(self, *args: Union[int, str, List[str]]) -> None:
         event = cast(
-            Event, dict(zip(["ts", "sender", "groupID", "text", "media"], args)),
+            Event,
+            dict(zip(["ts", "sender", "groupID", "text", "media"], args)),
         )
         sender: str = event["sender"]
         text: str = event["text"]

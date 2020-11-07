@@ -56,8 +56,9 @@ class WhispererBase:
     it'll be called on the next message from that number
     handles new users
     """
-    get_bus = classmethod(SessionBus)
-    get_loop = classmethod(GLib.MainLoop)
+
+    get_bus = staticmethod(SessionBus)
+    get_loop = staticmethod(GLib.MainLoop)
 
     def __init__(self, fname: str = "users.json") -> None:
         bus = self.get_bus()
@@ -69,7 +70,7 @@ class WhispererBase:
 
     def __enter__(self) -> "WhispererBase":
         user_names, followers, blocked = json.load(open(self.fname))
-        self.user_names = cast(bidict, {}) # tell pylint it's subscriptable
+        self.user_names = cast(bidict, {})  # tell pylint it's subscriptable
         self.user_names = bidict(user_names)
         self.followers = defaultdict(list, followers)
         self.blocked: Set[str] = set(blocked)
@@ -124,55 +125,66 @@ class WhispererBase:
         return f"other users will now see you as {name}"
 
     def receive(self, *args: Union[int, str, List[str]]) -> None:
-        event = cast(
-            Event, dict(zip(["ts", "sender", "groupID", "text", "media"], args))
-        )
-        self.log.append(event)
-        sender: str = event["sender"]
-        text: str = event["text"]
-        if text.lower() in ("stop", "block"):
+        try:
+            event = cast(
+                Event,
+                dict(zip(["ts", "sender", "groupID", "text", "media"], args)),
+            )
+            self.log.append(event)
+            sender: str = event["sender"]
+            text: str = event["text"]
+            if text.lower() in ("stop", "block"):
+                self.send(
+                    sender,
+                    "i'll stop messaging you. "
+                    "text START or UNBLOCK to resume texts",
+                )
+                self.blocked.add(sender)
+                return
+            if text.lower() in ("start", "unblock"):
+                if sender in self.blocked:
+                    self.blocked.remove(sender)
+                    self.send(sender, "welcome back")
+                else:
+                    self.send(sender, "you weren't blocked")
+                return
+            if sender in self.user_names:
+                sender_name = self.user_names[sender]
+            else:
+                sender_name = sender
+            event["sender_name"] = sender_name
+            print("Message", text, "from ", sender_name)
+            if self.state[sender]:
+                full_event = cast(FullEvent, event)
+                full_event["line"] = full_event["arg1"] = text
+                full_event["tokens"] = text.split(" ")
+                resp: Optional[str] = self.state[sender].popleft()(full_event)
+            elif text.startswith("/"):
+                command, *tokens = text[1:].split(" ")
+                full_event = cast(FullEvent, event)
+                full_event["tokens"] = tokens
+                full_event["arg1"] = tokens[0] if tokens else ""
+                full_event["line"] = " ".join(tokens)
+                full_event["command"] = command
+                if hasattr(self, f"do_{command}"):
+                    resp = getattr(self, f"do_{command}")(full_event)
+                else:
+                    resp = f"no such command {command}"
+            else:
+                resp = self.do_default(event)  # type: ignore
+            if resp is not None:
+                self.send(sender, resp)
+        except:
             self.send(
                 sender,
-                "i'll stop messaging you. "
-                "text START or UNBLOCK to resume texts",
+                "OOPSIE WOOPSIE!! Uwu We made a fucky wucky!!"
+                "A wittle fucko boingo! The code monkeys at our headquarters "
+                "are working VEWY HAWD to fix this!",
+                # source: https://knowyourmeme.com/memes/oopsie-woopsie
             )
-            self.blocked.add(sender)
-            return
-        if text.lower() in ("start", "unblock"):
-            if sender in self.blocked:
-                self.blocked.remove(sender)
-                self.send(sender, "welcome back")
-            else:
-                self.send(sender, "you weren't blocked")
-            return
-        if sender in self.user_names:
-            sender_name = self.user_names[sender]
-        else:
-            sender_name = sender
-        event["sender_name"] = sender_name
-        print("Message", text, "from ", sender_name)
-        if sender in self.state:
-            full_event = cast(FullEvent, event)
-            full_event["line"] = full_event["arg1"] = text
-            full_event["tokens"] = text.split(" ")
-            resp: Optional[str] = self.state[sender].popleft()(full_event)
-        elif text.startswith("/"):
-            command, *tokens = text[1:].split(" ")
-            full_event = cast(FullEvent, event)
-            full_event["tokens"] = tokens
-            full_event["arg1"] = tokens[0] if tokens else ""
-            full_event["line"] = " ".join(tokens)
-            full_event["command"] = command
-            try:
-                resp = getattr(self, f"do_{command}")(full_event)
-            except AttributeError:
-                resp = f"no such command {command}"
-        else:
-            resp = self.do_default(full_event)  # type: ignore
-        if resp is not None:
-            self.send(sender, resp)
+            raise
 
-    def do_default(self, event: FullEvent) -> None:
+    def do_default(self, event: Union[Event, FullEvent]) -> None:
         raise NotImplementedError
 
     def do_help(self, event: FullEvent) -> str:
@@ -191,8 +203,10 @@ class WhispererBase:
         else:
             resp = "documented commands: " + ", ".join(
                 name[3:]
-                for name, value in self.__dict__.items()
-                if name.startswith("do_") and value.__doc__
+                for name in dir(self)
+                if name.startswith("do_")
+                and getattr(self, name).__doc__
+                and name != "do_default"
             )  # doesn't work?
             return resp
 
@@ -207,6 +221,14 @@ def do_echo(event: FullEvent) -> str:
 
 
 class Whisperer(WhispererBase):
+    def do_default(self, event: Union[FullEvent, Event]) -> None:
+        """send a message to your followers"""
+        sender = event["sender"]
+        name = self.user_names[sender]
+        for follower in self.followers[sender]:
+            self.send(follower, f"{name}: {event['text']}", event["media"])
+        # maybe react to the message indicating it was sent
+
     do_echo = staticmethod(do_echo)
 
     def do_follow(self, event: FullEvent) -> str:
@@ -262,7 +284,9 @@ class Whisperer(WhispererBase):
         """/followers. list your followers"""
         sender = event["sender"]
         if sender in self.followers and self.followers[sender]:
-            return ", ".join(self.followers[sender])
+            return ", ".join(
+                self.user_names[number] for number in self.followers[sender]
+            )
         return "you don't have any followers"
 
     def do_following(self, event: FullEvent) -> str:
@@ -277,13 +301,20 @@ class Whisperer(WhispererBase):
             return "you aren't following anyone"
         return following
 
-    def do_default(self, event: FullEvent) -> None:
-        """send a message to your followers"""
-        sender = event["sender"]
-        name = self.user_names[sender]
-        for follower in self.followers[sender]:
-            self.send(follower, f"{name}: {event['text']}", event["media"])
-        # maybe react to the message indicating it was sent
+    def do_softblock(self, event: FullEvent) -> str:
+        """/softblock [number or name]. removes someone from your followers"""
+        if event["arg1"] in self.user_names.inverse:
+            number = self.user_names.inverse[event["arg1"]]
+        else:
+            number = event["arg1"]
+        if number not in self.followers[event["sender"]]:
+            return f"{event['arg1']} isn't following you"
+        self.followers[event["sender"]].remove(number)
+        return f"softblocked {event['arg1']}"
+
+
+# dissappearing messages
+# emoji?
 
 
 if __name__ == "__main__":

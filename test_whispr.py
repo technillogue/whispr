@@ -1,4 +1,4 @@
-from typing import List, Tuple, Set, Any, Iterator
+from typing import List, Tuple, Set, Any
 from collections import defaultdict
 import json
 import time
@@ -6,7 +6,6 @@ import os
 import inspect
 import pytest
 from whispr import Whisperer, bidict
-
 
 class MockLoop:
     def run(self) -> None:
@@ -25,16 +24,11 @@ class MockWhisperer(Whisperer):
     get_bus = staticmethod(lambda: {"org.asamk.Signal": MockSignal()})
     get_loop = staticmethod(MockLoop)
 
-    def __enter__(self) -> "MockWhisperer":
+    def __init__(self, fname: str = ""):
         self.followers = defaultdict(list)
         self.user_names = bidict()
         self.blocked: Set[str] = set()
-        return self
-
-    def __exit__(self, *args: Any) -> None:
-        pass
-
-    clear = __enter__
+        super().__init__()
 
     def outbox(self) -> List[Tuple[List[str], str, List[str]]]:
         return self.signal.outbox
@@ -66,21 +60,8 @@ class MockWhisperer(Whisperer):
 
 
 @pytest.fixture(name="wisp")  # type: ignore
-def wisp_fixture() -> Iterator[MockWhisperer]:
-    # should probably be named mock_whisperer, but that's annoyingly long
-    # and "wisp" is kinda cute
-    mock_whisperer = MockWhisperer("mock_users.json")
-    json.dump([{}, {}, []], open("mock_users.json", "w"))
-    with mock_whisperer:
-        yield mock_whisperer
-    os.remove("mock_users.json")
-    print("teardown")
-
-
-# ideally add a hypothesis test
-def test_echo(wisp: MockWhisperer) -> None:
-    assert wisp.do_echo({"line": "spam"}) == "spam"
-
+def wisp_fixture() -> MockWhisperer:
+    return MockWhisperer()
 
 alice = "+" + "1" * 11
 bob = "+" + "2" * 11
@@ -100,9 +81,10 @@ Her: "Cool, I wonder what he's up to these days"
 Me: this""",  # https://twitter.com/tonyhawk/status/844308362070151168
 ]
 
+def test_echo(wisp: MockWhisperer) -> None:
+    assert wisp.do_echo({"line": "spam"}) == "spam"
 
 def test_new_user(wisp: MockWhisperer) -> None:
-    wisp.clear()
     wisp.input(alice, "/echo hi!")
     assert wisp.take_outbox_for(alice) == [
         "welcome to whispr. text STOP or BLOCK to not receive messages",
@@ -117,7 +99,6 @@ def test_new_user(wisp: MockWhisperer) -> None:
 
 
 def test_follow_new_user_flow(wisp: MockWhisperer) -> None:
-    wisp.clear()
     wisp.user_names[alice] = "alice"
     wisp.check_in_out(alice, "/following", "you aren't following anyone")
     wisp.check_in_out(alice, f"/follow {bob}", f"followed {bob}")
@@ -135,7 +116,6 @@ def test_follow_new_user_flow(wisp: MockWhisperer) -> None:
 
 
 def test_multiple_followers(wisp: MockWhisperer) -> None:
-    wisp.clear()
     wisp.user_names.update({alice: "alice", bob: "bob", carol: "carol"})
     wisp.followers[alice] = [bob, carol]
     wisp.followers[bob] = [alice, carol]
@@ -171,7 +151,6 @@ def test_help(wisp: MockWhisperer) -> None:
 
 
 def test_softblock(wisp: MockWhisperer) -> None:
-    wisp.clear()
     wisp.user_names.update({alice: "alice", bob: "bob"})
     wisp.followers[alice] = [bob]
     wisp.followers[bob] = [alice]

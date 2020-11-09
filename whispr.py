@@ -211,7 +211,7 @@ class WhispererBase:
                     return dedent(doc).strip()
                 return f"{argument} isn't documented, sorry :("
             except AttributeError:
-                return f"no such command {argument}"
+                return f"no such command '{argument}'"
         else:
             resp = "documented commands: " + ", ".join(
                 name[3:]

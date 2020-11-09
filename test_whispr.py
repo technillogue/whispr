@@ -154,7 +154,7 @@ def test_new_user(wisp: MockWhisperer) -> None:
     assert wisp.user_names[alice] == "alice"
 
 
-def test_follow_new_user_flow(wisp: MockWhisperer) -> None:
+def test_follow(wisp: MockWhisperer) -> None:
     wisp.user_names[alice] = "alice"
     wisp.check_in_out(alice, "/following", "you aren't following anyone")
     wisp.check_in_out(alice, f"/follow {bob}", f"followed {bob}")
@@ -169,6 +169,12 @@ def test_follow_new_user_flow(wisp: MockWhisperer) -> None:
     wisp.check_in_out(bob, "/followers", "alice")
     wisp.input(bob, "hi alice")
     assert wisp.take_outbox_for(alice) == ["bob: hi alice"]
+    wisp.check_in_out(bob, "/follow alice", "followed alice")
+    wisp.check_in_out(
+        bob,
+        "/follow 11",
+        "11 doesn't look a number. did you include the country code?",
+    )
 
 
 def test_invite_unfollow(wisp: MockWhisperer) -> None:
@@ -238,6 +244,9 @@ def test_help(wisp: MockWhisperer) -> None:
         inspect.getdoc(getattr(wisp, f"do_{command}")) for command in commands
     ]
     wisp.check_in_out(alice, "/hlep", "no such command 'hlep'")
+    wisp.check_in_out(alice, "/help hlep", "no such command 'hlep'")
+    wisp.do_foo = lambda event: "fake" # type: ignore
+    wisp.check_in_out(alice, "/help foo", "foo isn't documented, sorry :(")
 
 
 def test_softblock(wisp: MockWhisperer) -> None:

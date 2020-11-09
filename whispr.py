@@ -15,8 +15,14 @@ from textwrap import dedent
 import json
 from mypy_extensions import TypedDict
 from bidict import bidict
-from pydbus import SessionBus
-from gi.repository import GLib # pylint: disable=import-error 
+try:
+    from pydbus import SessionBus
+    from gi.repository import GLib
+except ModuleNotFoundError:
+    # poetry can't package PyGObject's dependencies
+    SessionBus = lambda: lambda: None
+    GLib = lambda: None
+
 
 # maybe replace these with an actual class?
 # https://code.activestate.com/recipes/52308-the-simple-but-handy-collector-of-a-bunch-of-named
@@ -171,7 +177,7 @@ class WhispererBase:
                 if hasattr(self, f"do_{command}"):
                     resp = getattr(self, f"do_{command}")(full_event)
                 else:
-                    resp = f"no such command {command}"
+                    resp = f"no such command '{command}'"
             else:
                 resp = self.do_default(event)  # type: ignore
             if resp is not None:

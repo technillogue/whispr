@@ -32,9 +32,6 @@ class MockWhisperer(Whisperer):
         self.user_names = bidict()
         self.blocked: Set[str] = set()
 
-    def outbox(self) -> List[Tuple[List[str], str, List[str]]]:
-        return self.signal.outbox
-
     def take_outbox_for(self, number: str) -> List[str]:
         taken, kept = [], []
         for recipient, text, media in self.signal.outbox:
@@ -63,10 +60,9 @@ class MockWhisperer(Whisperer):
         self.receive(int(time.time()), sender, [], text, [])
 
 
-@pytest.fixture(name="wisp")  # type: ignore
+@pytest.fixture(name="wisp")
 def wisp_fixture() -> MockWhisperer:
     return MockWhisperer()
-
 
 # i think i screwed this up, i wanted it to be cleared between tests
 # and it isn't..
@@ -239,7 +235,7 @@ def test_help(wisp: MockWhisperer) -> None:
     assert wisp.take_outbox_for(alice) == [
         inspect.getdoc(getattr(wisp, f"do_{command}")) for command in commands
     ]
-
+    wisp.check_in_out(alice, "/hlep", "no such command 'hlep'")
 
 def test_softblock(wisp: MockWhisperer) -> None:
     wisp.user_names.update({alice: "alice", bob: "bob"})

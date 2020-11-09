@@ -15,13 +15,17 @@ from textwrap import dedent
 import json
 from mypy_extensions import TypedDict
 from bidict import bidict
+
 try:
     from pydbus import SessionBus
-    from gi.repository import GLib
+    from gi.repository.GLib import MainLoop  # pylint: disable=import-error
 except ModuleNotFoundError:
     # poetry can't package PyGObject's dependencies
-    SessionBus = lambda: lambda: None
-    GLib = lambda: None
+    SessionBus = lambda: {}
+
+    class MainLoop:  # type: ignore
+        def run(self) -> None:
+            pass
 
 
 # maybe replace these with an actual class?
@@ -66,7 +70,7 @@ class WhispererBase:
     """
 
     get_bus = staticmethod(SessionBus)
-    get_loop = staticmethod(GLib.MainLoop)
+    get_loop = staticmethod(MainLoop)
 
     def __init__(self, fname: str = "users.json") -> None:
         bus = self.get_bus()

@@ -1,10 +1,11 @@
-from typing import List, Tuple, Set
+from typing import List, Tuple, Set, cast
 from collections import defaultdict
 import json
 import time
 import os
 import inspect
 import pytest
+import whispr
 from whispr import Whisperer, bidict
 
 
@@ -63,6 +64,7 @@ class MockWhisperer(Whisperer):
 @pytest.fixture(name="wisp")
 def wisp_fixture() -> MockWhisperer:
     return MockWhisperer()
+
 
 # i think i screwed this up, i wanted it to be cleared between tests
 # and it isn't..
@@ -237,6 +239,7 @@ def test_help(wisp: MockWhisperer) -> None:
     ]
     wisp.check_in_out(alice, "/hlep", "no such command 'hlep'")
 
+
 def test_softblock(wisp: MockWhisperer) -> None:
     wisp.user_names.update({alice: "alice", bob: "bob"})
     wisp.followers[alice] = [bob]
@@ -274,3 +277,11 @@ def test_silly_error() -> None:
         "A wittle fucko boingo! The code monkeys at our headquarters "
         "are working VEWY HAWD to fix this!"
     ]
+
+
+def test_notimplemented() -> None:
+    with pytest.raises(NotImplementedError):
+        whispr.WhispererBase.get_bus = staticmethod(
+            lambda: {"org.asamk.Signal": MockSignal()}
+        )
+        whispr.WhispererBase().do_default(cast(whispr.FullEvent, {}))

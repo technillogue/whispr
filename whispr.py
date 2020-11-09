@@ -16,7 +16,7 @@ import json
 from mypy_extensions import TypedDict
 from bidict import bidict
 from pydbus import SessionBus
-from gi.repository import GLib
+from gi.repository import GLib # pylint: disable=import-error 
 
 # maybe replace these with an actual class?
 # https://code.activestate.com/recipes/52308-the-simple-but-handy-collector-of-a-bunch-of-named

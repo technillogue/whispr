@@ -245,7 +245,7 @@ def test_help(wisp: MockWhisperer) -> None:
     ]
     wisp.check_in_out(alice, "/hlep", "no such command 'hlep'")
     wisp.check_in_out(alice, "/help hlep", "no such command 'hlep'")
-    wisp.do_foo = lambda event: "fake" # type: ignore
+    wisp.do_foo = lambda event: "fake"  # type: ignore
     wisp.check_in_out(alice, "/help foo", "foo isn't documented, sorry :(")
 
 

@@ -24,7 +24,8 @@ jobs:
                     key: '${{ runner.os }}-poetry-${{ hashFiles(''poetry.lock'') }}'
                     restore-keys: |
                         ${{ runner.os }}-poetry-
-            	run: poetry install # if: steps.cache.outputs.cache-hit != 'true'
+            -
+                run: poetry install # if: steps.cache.outputs.cache-hit != 'true'
             -
                 name: Pytest
                 run: poetry run pytest --cov . 

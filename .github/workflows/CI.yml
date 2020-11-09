@@ -28,7 +28,7 @@ jobs:
                 run: poetry install # if: steps.cache.outputs.cache-hit != 'true'
             -
                 name: Pytest
-                run: poetry run pytest --cov . 
+                run: poetry run pytest . --cov whispr --cov test_whispr
                 if: always()
             -
                 uses: codecov/codecov-action@v1
@@ -43,9 +43,9 @@ jobs:
                 run: poetry run black . --check -l 81
             -
                 name: Mypy
-                run: poetry run mypy .
+                run: poetry run mypy whispr.py test_whispr.py
                 if: always()
             -
                 name: Pylint
-                run: poetry run pylint .
+                run: poetry run pylint whispr.py test_whispr.py
                 if: always()

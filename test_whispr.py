@@ -101,6 +101,7 @@ def test_cache() -> None:
         open("mock_users.json", "w"),
     )
     with wisp:
+        wisp.run()
         wisp.input(bob, f"/follow {carol}")
         assert wisp.take_outbox_for(carol) == [
             "welcome to whispr. text STOP or BLOCK to not receive messages",

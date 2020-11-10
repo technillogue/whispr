@@ -9,23 +9,22 @@ import whispr
 from whispr import Whisperer, bidict
 
 
-class MockLoop:
-    def run(self) -> None:
-        pass
-
-
 class MockSignal:
     def __init__(self) -> None:
         self.outbox: List[Tuple[List[str], str, List[str]]] = []
 
-    def sendMessage(self, msg: str, media: List[str], recip: List[str]) -> None:
+    def write(self, msg: bytes) -> None:
+        msg = msg.decode("utf-8")
+        self.outbox.append(msg.split(b": "))
+
+    def __getattr__(self, name):
+        if name == "stdout":
+
+    def sendMessage(self, msg: strrecip: List[str]) -> None:
         self.outbox.append((recip, msg, media))
 
 
 class MockWhisperer(Whisperer):
-    get_bus = staticmethod(lambda: {"org.asamk.Signal": MockSignal()})
-    get_loop = staticmethod(MockLoop)
-
     def __init__(self, fname: str = "mock_users.json"):
         super().__init__()
         self.fname = fname
@@ -293,4 +292,4 @@ def test_notimplemented() -> None:
         whispr.WhispererBase.get_bus = staticmethod(
             lambda: {"org.asamk.Signal": MockSignal()}
         )
-        whispr.WhispererBase().do_default(cast(whispr.FullEvent, {}))
+        whispr.WhispererBase().do_default(cast(whispr.Event, {}))

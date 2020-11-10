@@ -12,9 +12,9 @@ whispr now uses a patched version of signal-cli that uses stdin/stdout instead o
 to run a server yourself, you must install [signal-cli](https://github.com/AsamK/signal-cli).
 
 ```sh
-wget https://github.com/technillogue/signal-cli/blob/master/build/distributions/signal-cli-0.6.11.tar
-tar xf signal-cli-0.6.11.tar 
-ln -s signal-cli-0.6.11.tar/bin/signal-cli signal-cli-script
+wget https://github.com/technillogue/signal-cli/blob/master/build/distributions/signal-cli-0.6.11.tar?raw=true -O signal-cli.tar
+tar xf signal-cli.tar 
+ln -s signal-cli-0.6.11/bin/signal-cli signal-cli-script
 ```
 
 you need a phone number that is not already registered with signal. you can use google voice or twilio for this. all phone numbers must start with a plus sign and the country code.

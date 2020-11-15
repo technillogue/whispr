@@ -18,12 +18,13 @@ import logging
 from mypy_extensions import TypedDict
 from bidict import bidict
 
-SIGNAL_CLI = "./signal-cli-script -u +14848134069 daemon --json".split()
+NUMBER = open("number").read().strip()
+SIGNAL_CLI = f"./signal-cli-script -u {NUMBER} daemon --json".split()
 
 logging.basicConfig(
     level=logging.DEBUG, format="{levelname}: {message}", style="{"
 )
-# TODO: refactor into a class that matches signal-cli output
+# later: refactor into a class that matches signal-cli output
 # https://code.activestate.com/recipes/52308-the-simple-but-handy-collector-of-a-bunch-of-named
 Event = TypedDict(
     "Event",
@@ -34,6 +35,7 @@ Event = TypedDict(
         "media": List[str],
         "ts": str,
         "groupID": str,
+        # added by receive
         "command": str,
         "line": str,
         "tokens": List[str],
@@ -58,13 +60,23 @@ class WhispererBase:
         self.log: List[Event] = []
         self.state: State = defaultdict(deque)
 
+    # so that it can be mocked out in test
+    Popen = Popen
+
     def __enter__(self) -> "WhispererBase":
-        user_names, followers, blocked = json.load(open(self.fname))
+        try:
+            user_names, followers, blocked = json.load(open(self.fname))
+        except FileNotFoundError:
+            user_names, followers, blocked = [{}, {}, []]
+        try:
+            self.admins = json.load(open("admins"))
+        except FileNotFoundError:
+            self.admins = []
         self.user_names = cast(bidict, {})  # tell pylint it's subscriptable
         self.user_names = bidict(user_names)
         self.followers = defaultdict(list, followers)
         self.blocked: Set[str] = set(blocked)
-        self.signal_proc = Popen(
+        self.signal_proc = self.Popen(
             SIGNAL_CLI, stdin=PIPE, stdout=PIPE, stderr=PIPE
         )
         logging.info("started signal-cli process")
@@ -81,7 +93,7 @@ class WhispererBase:
     def do_default(self, event: Event) -> None:
         raise NotImplementedError
 
-    def do_help(self, event: Event) -> None:
+    def do_help(self, event: Event) -> str:
         """
         /help [command]. see the documentation for command, or all commands
         """
@@ -125,7 +137,8 @@ class WhispererBase:
             self.state[number].append(followup_wrapper)
 
     def send(self, recipient: str, message: str) -> None:
-        if recipient not in self.blocked:
+        assert self.signal_proc.stdin
+        if recipient not in self.blocked and message:
             if recipient not in self.user_names:
                 self.user_names[recipient] = recipient
                 self.send(
@@ -143,7 +156,7 @@ class WhispererBase:
                 )
                 self.signal_proc.stdin.flush()
 
-    def receive_reaction(self, event: Event):
+    def receive_reaction(self, event: Event) -> None:
         pass
 
     def receive(self, event: Event) -> None:
@@ -173,19 +186,17 @@ class WhispererBase:
             event["sender_name"] = sender_name
             print("Message", text, "from ", sender_name)
             if self.state[sender]:
-                full_event = cast(Event, event)
-                full_event["line"] = full_event["arg1"] = text
-                full_event["tokens"] = text.split(" ")
-                resp: Optional[str] = self.state[sender].popleft()(full_event)
+                event["line"] = event["arg1"] = text
+                event["tokens"] = text.split(" ")
+                resp: Optional[str] = self.state[sender].popleft()(event)
             elif text.startswith("/"):
                 command, *tokens = text[1:].split(" ")
-                full_event = cast(Event, event)
-                full_event["tokens"] = tokens
-                full_event["arg1"] = tokens[0] if tokens else ""
-                full_event["line"] = " ".join(tokens)
-                full_event["command"] = command
+                event["tokens"] = tokens
+                event["arg1"] = tokens[0] if tokens else ""
+                event["line"] = " ".join(tokens)
+                event["command"] = command
                 if hasattr(self, f"do_{command}"):
-                    resp = getattr(self, f"do_{command}")(full_event)
+                    resp = getattr(self, f"do_{command}")(event)
                 else:
                     resp = f"no such command '{command}'"
             else:
@@ -203,14 +214,11 @@ class WhispererBase:
             raise
 
     def run(self) -> None:
-        # try also forwarding something from twitter
-        # so you could test without needing two accounts
-        # probably easiest yet expensive to just GET
-        # setting up webhooks would be annoying
+        assert self.signal_proc.stdout
         while 1:
             line = self.signal_proc.stdout.readline().decode("utf-8")
             if not line.startswith("{"):
-                logging.debug(f"signal-cli says: {line.strip()}")
+                logging.info("signal-cli says: %s", line.strip())
                 continue
             try:
                 envelope = json.loads(line)["envelope"]
@@ -222,16 +230,15 @@ class WhispererBase:
                 event["media"] = event["attachments"]
                 event["groupID"] = event["groupInfo"]
                 event = cast(Event, event)
-                # so that i don't have to rewrite the code right away
                 if event["reaction"]:
                     self.receive_reaction(event)
                 else:
                     event["text"] = event["message"]
                     self.receive(event)
             except KeyError:
-                logging.debug(f"not a datamessage: {line.strip()}")
+                logging.debug("not a datamessage: %s", line.strip())
             except json.JSONDecodeError:
-                logging.log(f"couldn't decode {line.strip()}")
+                logging.info("can't decode %s", line.strip())
 
 
 def do_echo(event: Event) -> str:
@@ -357,8 +364,10 @@ class Whisperer(WhispererBase):
         for you. you'll receive messages from those number(s) until you leave
         proxy mode
         """
-        proxier = self.event["sender_name"]
-        number = self.event["sender"]
+        proxier = event["sender_name"]
+        if proxier not in self.admins:
+            return "you must be an admin to use this command"
+        number = event["sender"]
         if proxier.endswith("proxied"):
             self.user_names[number] = proxier[:-7]
             return "exited proxy mode"
@@ -370,13 +379,14 @@ class Whisperer(WhispererBase):
                 self.followup(
                     event["sender"], "sent that to {proxier}", take_response
                 )
-            self.send(
-                event["sender"],
-                "(note: your messages are no longer sent to {proxier})",
-            )
-            self.receive(event)
+            else:
+                self.send(
+                    event["sender"],
+                    "(note: your messages are no longer sent to {proxier})",
+                )
+                self.receive(event)
 
-        def proxy(event: Event):
+        def proxy(event: Event) -> Optional[str]:
             if event["text"].startswith("/proxy"):
                 self.user_names[number] = proxier
                 return "exited proxy mode"
@@ -385,13 +395,16 @@ class Whisperer(WhispererBase):
             if take_response not in self.state[target]:
                 self.followup(
                     target,
-                    "(note: your messages are now received by {proxier})",
+                    "",
                     take_response,
                 )
             self.followup(number, "sent", proxy)
             return None
 
-        self.followup(number, "entered proxy mode", proxy)
+        if proxy not in self.state[number]:
+            self.followup(number, "", proxy)
+            return "entered proxy mode"
+        return "you're already in proxy mode"
 
 
 # dissappearing messages

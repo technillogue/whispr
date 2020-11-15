@@ -8,22 +8,22 @@ a signal bot that runs a little social media. use commands to follow other users
 
 ## installation 
 
-whispr now uses a patched version of signal-cli that uses stdin/stdout instead of dbus. 
-to run a server yourself, you must install [signal-cli](https://github.com/AsamK/signal-cli).
+whispr now uses a patched version of [signal-cli](https://github.com/techillogue/signal-cli) that uses stdin/stdout instead of dbus, which you must build to run a server yourself. at some point it'll be possible to download a distribution tarball, but that doesn't seem to work yet.
 
 ```sh
-wget https://github.com/technillogue/signal-cli/blob/master/build/distributions/signal-cli-0.6.11.tar?raw=true -O signal-cli.tar
-tar xf signal-cli.tar 
-ln -s signal-cli-0.6.11/bin/signal-cli signal-cli-script
+git clone https://github.com/technillogue/signal-cli
+cd signal-cli
+./gradlew build
+./gradlew installDist
+ln -s signal-cli/build/install/signal-cli/bin/signal-cli ../signal-cli-script
 ```
 
-you need a phone number that is not already registered with signal. you can use google voice or twilio for this. all phone numbers must start with a plus sign and the country code.
+you need a phone number that is not already registered with signal. you can use google voice or twilio for this. all phone numbers must include a + country code and no other formatting.
 
 ```sh
-export USERNAME="your phone number"
-./signal-cli-script -u ${USERNAME} register
-./signal-cli-script -u ${USERNAME} verify <verification code from signal>
-sed 's/\+15345444555/${USERNAME}/' wispr.py
+echo "your phone number" > number # also used by whispr.py
+./signal-cli-script -u `cat number` register
+./signal-cli-script -u `cat number` verify <verification code from signal>
 ```
 
-run `poetry install` (and `pip3 install poetry` if you haven't already)
+finally, run `poetry install` (and `pip3 install poetry` if you haven't already).

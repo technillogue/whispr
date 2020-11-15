@@ -1,4 +1,4 @@
-!/usr/bin/python3
+#!/usr/bin/python3
 from typing import (
     Optional,
     Any,
@@ -18,7 +18,7 @@ import logging
 from mypy_extensions import TypedDict
 from bidict import bidict
 
-SIGNAL_CLI = "./signal-cli-script -u +15345444555 daemon --json".split()
+SIGNAL_CLI = "./signal-cli-script -u +14848134069 daemon --json".split()
 
 logging.basicConfig(
     level=logging.DEBUG, format="{levelname}: {message}", style="{"
@@ -78,9 +78,10 @@ class WhispererBase:
         self.signal_proc.kill()
         logging.info("killed signal-cli process")
 
-    def do_default(self, event: Union[Event, Event]) -> None:
+    def do_default(self, event: Event) -> None:
         raise NotImplementedError
 
+    def do_help(self, event: Event) -> None:
         """
         /help [command]. see the documentation for command, or all commands
         """
@@ -95,7 +96,7 @@ class WhispererBase:
                 return f"no such command '{argument}'"
         else:
             resp = "documented commands: " + ", ".join(
-                name[2:] for name in dir(self) if name.startswith("do_")
+                name[3:] for name in dir(self) if name.startswith("do_")
             )
         return resp
 
@@ -209,7 +210,7 @@ class WhispererBase:
         while 1:
             line = self.signal_proc.stdout.readline().decode("utf-8")
             if not line.startswith("{"):
-                logging.debug(f"signal-cli says: {line}")
+                logging.debug(f"signal-cli says: {line.strip()}")
                 continue
             try:
                 envelope = json.loads(line)["envelope"]
@@ -228,9 +229,9 @@ class WhispererBase:
                     event["text"] = event["message"]
                     self.receive(event)
             except KeyError:
-                logging.debug(f"not a datamessage: {line}")
+                logging.debug(f"not a datamessage: {line.strip()}")
             except json.JSONDecodeError:
-                logging.log(f"couldn't decode {line}")
+                logging.log(f"couldn't decode {line.strip()}")
 
 
 def do_echo(event: Event) -> str:
@@ -248,7 +249,7 @@ class Whisperer(WhispererBase):
         else:
             name = self.user_names[sender]
             for follower in self.followers[sender]:
-                self.send(follower, f"{name}: {event['text']}", event["media"])
+                self.send(follower, f"{name}: {event['text']}")
             # ideally react to the message indicating it was sent
 
     do_echo = staticmethod(do_echo)
@@ -349,6 +350,48 @@ class Whisperer(WhispererBase):
             return f"you aren't following {event['arg1']}"
         self.followers[number].remove(event["sender"])
         return f"unfollowed {event['arg1']}"
+
+    def do_proxy(self, event: Event) -> str:
+        """
+        toggle proxy mode. write number:message pairs and whispr will send them
+        for you. you'll receive messages from those number(s) until you leave
+        proxy mode
+        """
+        proxier = self.event["sender_name"]
+        number = self.event["sender"]
+        if proxier.endswith("proxied"):
+            self.user_names[number] = proxier[:-7]
+            return "exited proxy mode"
+        self.user_names[number] = proxier + "proxied"
+
+        def take_response(event: Event) -> None:
+            if self.user_names[number].endswith("proxied"):
+                self.send(number, event["sender_name"] + ": " + event["text"])
+                self.followup(
+                    event["sender"], "sent that to {proxier}", take_response
+                )
+            self.send(
+                event["sender"],
+                "(note: your messages are no longer sent to {proxier})",
+            )
+            self.receive(event)
+
+        def proxy(event: Event):
+            if event["text"].startswith("/proxy"):
+                self.user_names[number] = proxier
+                return "exited proxy mode"
+            target, msg = event["text"].split(":", 1)
+            self.send(target, msg)
+            if take_response not in self.state[target]:
+                self.followup(
+                    target,
+                    "(note: your messages are now received by {proxier})",
+                    take_response,
+                )
+            self.followup(number, "sent", proxy)
+            return None
+
+        self.followup(number, "entered proxy mode", proxy)
 
 
 # dissappearing messages

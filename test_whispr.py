@@ -139,7 +139,7 @@ Me: this""",  # https://twitter.com/tonyhawk/status/844308362070151168
 
 
 def test_cache(caplog: Any) -> None:
-    caplog.set_level(logging.DEBUG)
+    caplog.set_level(logging.WARNING)
     wisp = MockWhisperer(empty=True)
     inputs = [
         (bob, f"/follow {carol}"),
@@ -182,12 +182,9 @@ def test_cache(caplog: Any) -> None:
             "i'll stop messaging you. text START or UNBLOCK to resume texts",
         ]
     assert [
-        "started signal-cli process",  # __init__ calls __enter__
-        "started signal-cli process",
         "signal-cli says: spam",
         "can't decode {",
         "not a datamessage: " + json.dumps({"envelope": {}}),
-        "killed signal-cli process",
     ] == [rec.message for rec in caplog.records]
     assert json.load(open("mock_users.json")) == [
         {alice: "alice", bob: "bob", carol: "carol", nancy: nancy},
@@ -331,6 +328,25 @@ def test_softblock() -> None:
     wisp.check_in_out(
         alice, f"/softblock {nancy}", f"{nancy} isn't following you"
     )
+
+
+def test_proxy() -> None:
+    wisp = MockWhisperer()
+    other_server = "+1" + "0" * 10
+    wisp.check_in_out(
+        alice, "/proxy", "you must be an admin to use this command"
+    )
+    wisp.admins.append(alice)
+    wisp.check_in_out(alice, "/proxy", "entered proxy mode")
+    wisp.check_in_out(alice, other_server + ":/echo spam", "sent")
+    assert wisp.take_outbox_for(other_server) == ["/echo spam"]
+    wisp.input(other_server, "spam")
+    assert wisp.take_outbox_for(alice) == [other_server + ": spam"]
+    wisp.check_in_out(alice, "/proxy", "exited proxy mode")
+    # followup state notices alice left proxy mode and re-receives message
+    wisp.input(other_server, "extra spam")
+    assert wisp.take_outbox_for(other_server)[1] == "extra spam yourself"
+    wisp.check_in_out(alice, "/echo hi", "hi")
 
 
 def test_silly_error() -> None:

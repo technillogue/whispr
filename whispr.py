@@ -136,10 +136,10 @@ class WhispererBase:
 
             self.state[number].append(followup_wrapper)
 
-    def send(self, recipient: str, message: str) -> None:
+    def send(self, recipient: str, message: str, force: bool = False) -> None:
         assert self.signal_proc.stdin
-        if recipient not in self.blocked and message:
-            if recipient not in self.user_names:
+        if force or recipient not in self.blocked and message:
+            if not force and recipient not in self.user_names:
                 self.user_names[recipient] = recipient
                 self.send(
                     recipient,
@@ -184,7 +184,7 @@ class WhispererBase:
             else:
                 sender_name = sender
             event["sender_name"] = sender_name
-            print("Message", text, "from ", sender_name)
+            logging.info("%s says %s", sender_name, text)
             if self.state[sender]:
                 event["line"] = event["arg1"] = text
                 event["tokens"] = text.split(" ")
@@ -218,7 +218,7 @@ class WhispererBase:
         while 1:
             line = self.signal_proc.stdout.readline().decode("utf-8")
             if not line.startswith("{"):
-                logging.info("signal-cli says: %s", line.strip())
+                logging.warning("signal-cli says: %s", line.strip())
                 continue
             try:
                 envelope = json.loads(line)["envelope"]
@@ -236,9 +236,9 @@ class WhispererBase:
                     event["text"] = event["message"]
                     self.receive(event)
             except KeyError:
-                logging.debug("not a datamessage: %s", line.strip())
+                logging.warning("not a datamessage: %s", line.strip())
             except json.JSONDecodeError:
-                logging.info("can't decode %s", line.strip())
+                logging.error("can't decode %s", line.strip())
 
 
 def do_echo(event: Event) -> str:
@@ -365,25 +365,19 @@ class Whisperer(WhispererBase):
         proxy mode
         """
         proxier = event["sender_name"]
-        if proxier not in self.admins:
-            return "you must be an admin to use this command"
         number = event["sender"]
-        if proxier.endswith("proxied"):
-            self.user_names[number] = proxier[:-7]
-            return "exited proxy mode"
+        if number not in self.admins:
+            return "you must be an admin to use this command"
         self.user_names[number] = proxier + "proxied"
+        # should be caught by the followup
+        assert not proxier.endswith("proxied")
 
         def take_response(event: Event) -> None:
             if self.user_names[number].endswith("proxied"):
                 self.send(number, event["sender_name"] + ": " + event["text"])
-                self.followup(
-                    event["sender"], "sent that to {proxier}", take_response
-                )
+                self.followup(event["sender"], "", take_response)
             else:
-                self.send(
-                    event["sender"],
-                    "(note: your messages are no longer sent to {proxier})",
-                )
+                self.send(event["sender"], "")
                 self.receive(event)
 
         def proxy(event: Event) -> Optional[str]:
@@ -391,13 +385,9 @@ class Whisperer(WhispererBase):
                 self.user_names[number] = proxier
                 return "exited proxy mode"
             target, msg = event["text"].split(":", 1)
-            self.send(target, msg)
+            self.send(target, msg, force=True)
             if take_response not in self.state[target]:
-                self.followup(
-                    target,
-                    "",
-                    take_response,
-                )
+                self.followup(target, "", take_response)
             self.followup(number, "sent", proxy)
             return None
 

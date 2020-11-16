@@ -1,9 +1,10 @@
-#!/usr/bin/python3
+#!/usr/bin/python3 -i
 from typing import (
     Optional,
     Any,
     Union,
     List,
+    Dict,
     Set,
     Callable,
     DefaultDict,
@@ -14,6 +15,7 @@ from collections import defaultdict, deque
 from textwrap import dedent
 from subprocess import Popen, PIPE
 import json
+import time
 import logging
 from mypy_extensions import TypedDict
 from bidict import bidict
@@ -33,9 +35,11 @@ Event = TypedDict(
         "sender_name": str,
         "text": str,
         "media": List[str],
-        "ts": str,
+        "ts": int,
         "groupID": str,
+        "reaction": dict,
         # added by receive
+        "reactions": dict,
         "command": str,
         "line": str,
         "tokens": List[str],
@@ -57,7 +61,8 @@ class WhispererBase:
 
     def __init__(self, fname: str = "users.json") -> None:
         self.fname = fname
-        self.log: List[Event] = []
+        self.log: Dict[int, Dict[str, Event]] = defaultdict(dict)
+        self.out_log: Dict[int, Dict[str, Event]] = defaultdict(dict)
         self.state: State = defaultdict(deque)
 
     # so that it can be mocked out in test
@@ -72,7 +77,6 @@ class WhispererBase:
         try:
             self.admins = json.load(open("admins"))
         except FileNotFoundError:
-            logging.info("no admin file")
             self.admins = []
         self.user_names = cast(bidict, {})  # tell pylint it's subscriptable
         self.user_names = bidict(user_names)
@@ -119,7 +123,9 @@ class WhispererBase:
         """/name [name]. set or change your name"""
         name = event["arg1"]
         if name in self.user_names.inverse:
-            return f"{name} is already taken, use a different name"
+            return (
+                f"'{name}' is already taken, use /name to set a different name"
+            )
         self.user_names[event["sender"]] = name
         return f"other users will now see you as {name}"
 
@@ -159,14 +165,43 @@ class WhispererBase:
                 )
                 self.signal_proc.stdin.flush()
 
+    fib = [0, 1]
+    for i in range(20):
+        fib.append(fib[-2] + fib[-1])
+
+    #              self.out_log[event["ts"]][follower] = event
     def receive_reaction(self, event: Event) -> None:
-        pass
+        sender = event["sender"]
+        sender_name = self.user_names[sender]
+        reaction = event["reaction"]
+        target_ts = round(reaction["targetTimestamp"] / 1000)
+        logging.debug("reaction from %s targeting %s", sender, target_ts)
+        self.log[event["ts"]][sender] = event
+        if reaction["targetAuthor"] == NUMBER:
+            if target_ts in self.out_log:
+                reacted = self.out_log[target_ts][sender]
+                logging.debug("found target message %s", reacted["text"])
+                reacted["reactions"][sender_name] = reaction["emoji"]
+                logging.debug("reactions: %s", repr(reacted["reactions"]))
+                count = len(reacted["reactions"])
+                if count in self.fib:
+                    logging.debug("sending reaction notif")
+                    # maybe only show reactions that haven't been shown before
+                    self.send(
+                        reacted["sender"],
+                        f"reactions to '{reacted['text']}': "
+                        + ", ".join(
+                            f"{name}: {react}"
+                            for name, react in reacted["reactions"].items()
+                        ),
+                    )
 
     def receive(self, event: Event) -> None:
         sender: str = event["sender"]
         text: str = event["text"]
         try:
-            self.log.append(event)
+            event["reactions"] = {}
+            self.log[event["ts"]][sender] = event
             if text.lower() in ("stop", "block"):
                 self.send(
                     sender,
@@ -187,7 +222,7 @@ class WhispererBase:
             else:
                 sender_name = sender
             event["sender_name"] = sender_name
-            logging.info("%s says %s", sender_name, text)
+            logging.info("%s: %s says %s", event["ts"], sender_name, text)
             if self.state[sender]:
                 event["line"] = event["arg1"] = text
                 event["tokens"] = text.split(" ")
@@ -229,7 +264,7 @@ class WhispererBase:
                 if not event:
                     raise KeyError
                 event["sender"] = envelope["source"]
-                event["ts"] = event["timestamp"]
+                event["ts"] = round(event["timestamp"] / 1000)
                 event["media"] = event["attachments"]
                 event["groupID"] = event["groupInfo"]
                 event = cast(Event, event)
@@ -259,6 +294,7 @@ class Whisperer(WhispererBase):
         else:
             name = self.user_names[sender]
             for follower in self.followers[sender]:
+                self.out_log[round(time.time())][follower] = event
                 self.send(follower, f"{name}: {event['text']}")
             # ideally react to the message indicating it was sent
 
@@ -397,7 +433,6 @@ class Whisperer(WhispererBase):
         if proxy not in self.state[number]:
             self.followup(number, "", proxy)
             return "entered proxy mode"
-        return "you're already in proxy mode"
 
 
 # dissappearing messages

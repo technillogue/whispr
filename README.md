@@ -3,6 +3,8 @@
 
 # whispr
 
+public server: +14848134069
+
 a signal bot that runs a little social media. use commands to follow other users or invite them to follow you. messages to whisprbot that don't start with `/` are posts, and will be sent to your followers. unlike a group chat, your followers cannot see who else follows you, and have fine-grained control over who to get messages from. use `/help` for on-line documentation.
 
 

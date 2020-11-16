@@ -18,8 +18,8 @@ import logging
 from mypy_extensions import TypedDict
 from bidict import bidict
 
-NUMBER = open("number").read().strip()
-SIGNAL_CLI = f"./signal-cli-script -u {NUMBER} daemon --json".split()
+SERVER_NUMBER = open("server_number").read().strip()
+SIGNAL_CLI = f"./signal-cli-script -u {SERVER_NUMBER} daemon --json".split()
 
 logging.basicConfig(
     level=logging.DEBUG, format="{levelname}: {message}", style="{"
@@ -193,7 +193,7 @@ class WhispererBase:
         target_ts = round(reaction["targetTimestamp"] / 1000)
         logging.debug("reaction from %s targeting %s", sender, target_ts)
         self.received_messages[event["ts"]][sender] = event
-        if reaction["targetAuthor"] == NUMBER:
+        if reaction["targetAuthor"] == SERVER_NUMBER:
             if target_ts in self.sent_messages:
                 target_message = self.sent_messages[target_ts][sender]
                 logging.debug("found target message %s", target_message["text"])

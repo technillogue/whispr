@@ -52,36 +52,11 @@ zoe = "+" + "9" * 11  # follows yoric
 class MockWhisperer(Whisperer):
     def __init__(self, fname: str = "mock_users.json", empty: bool = False):
         Whisperer.Popen = MockSignalProc  # type: ignore
-        super().__init__()
-        self.fname = fname
+        super().__init__(fname)
         self.__enter__()
-        if empty:
+        if empty: # should load mock_users.json
             self.user_names = bidict()
             self.followers = defaultdict(list)
-        else:
-            self.user_names = bidict(
-                {
-                    alice: "alice",
-                    bob: "bob",
-                    carol: "carol",
-                    leatrice: "leatrice",
-                    goofus: "goofus",
-                    xeres: "xeres",
-                    yoric: "yoric",
-                    zoe: "zoe",
-                }
-            )
-            self.followers = defaultdict(
-                list,
-                {
-                    alice: [bob, carol],
-                    bob: [alice],
-                    carol: [alice],
-                    xeres: [yoric],
-                    yoric: [zoe],
-                    zoe: [xeres],
-                },
-            )
         self.blocked: Set[str] = set()
 
     def run_with_input(self, events: List[str]) -> None:
@@ -140,7 +115,7 @@ Me: this""",  # https://twitter.com/tonyhawk/status/844308362070151168
 
 def test_cache(caplog: Any) -> None:
     caplog.set_level(logging.WARNING)
-    wisp = MockWhisperer(empty=True)
+    wisp = MockWhisperer("testing_users.json", empty=True)
     inputs = [
         (bob, f"/follow {carol}"),
         (carol, "carol"),
@@ -169,7 +144,7 @@ def test_cache(caplog: Any) -> None:
     ] + ["spam", "{", json.dumps({"envelope": {}})]
     json.dump(
         [{alice: "alice", bob: "bob"}, {alice: [bob]}, [nancy]],
-        open("mock_users.json", "w"),
+        open("testing_users.json", "w"),
     )
     with wisp:
         with pytest.raises(Exception, match="nothing to read"):
@@ -186,12 +161,12 @@ def test_cache(caplog: Any) -> None:
         "can't decode {",
         "not a datamessage: " + json.dumps({"envelope": {}}),
     ] == [rec.message for rec in caplog.records]
-    assert json.load(open("mock_users.json")) == [
+    assert json.load(open("testing_users.json")) == [
         {alice: "alice", bob: "bob", carol: "carol", nancy: nancy},
         {alice: [], carol: [bob]},
         [carol],
     ]
-    os.remove("mock_users.json")
+    os.remove("testing_users.json")
 
 
 def test_echo(wisp: MockWhisperer) -> None:

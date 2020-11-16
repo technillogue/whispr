@@ -67,10 +67,12 @@ class WhispererBase:
         try:
             user_names, followers, blocked = json.load(open(self.fname))
         except FileNotFoundError:
+            logging.warning("didn't find saved user data")
             user_names, followers, blocked = [{}, {}, []]
         try:
             self.admins = json.load(open("admins"))
         except FileNotFoundError:
+            logging.info("no admin file")
             self.admins = []
         self.user_names = cast(bidict, {})  # tell pylint it's subscriptable
         self.user_names = bidict(user_names)
@@ -87,6 +89,7 @@ class WhispererBase:
             [dict(self.user_names), self.followers, list(self.blocked)],
             open(self.fname, "w"),
         )
+        logging.info("dumped user data to %s", self.fname)
         self.signal_proc.kill()
         logging.info("killed signal-cli process")
 

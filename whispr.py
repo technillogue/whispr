@@ -7,11 +7,9 @@ from typing import (
     Dict,
     Set,
     Callable,
-    DefaultDict,
-    Deque,
     cast,
 )
-from collections import defaultdict, deque
+from collections import defaultdict
 from textwrap import dedent
 from subprocess import Popen, PIPE
 import json
@@ -34,9 +32,7 @@ Event = TypedDict(
         "sender": str,
         "sender_name": str,
         "text": str,
-        "media": List[str],
         "ts": int,
-        "groupID": str,
         "reaction": dict,
         # added by receive
         "reactions": dict,
@@ -44,28 +40,27 @@ Event = TypedDict(
         "line": str,
         "tokens": List[str],
         "arg1": str,
+        "target": str,
     },
     total=False,
 )
-State = DefaultDict[str, Deque[Callable[[Event], Optional[str]]]]
+Callback = Callable[[Event], Optional[str]]
 
 
 class WhispererBase:
     """
-    handles receiving and sending messages
-    blocking and unblocking
-    append a function to state[number],
-    it'll be called on the next message from that number
-    handles new users
+    handles communicating with signal-cli; sending messages; registering
+    callbacks; routing received messages to callbacks, commands, or do_default;
+    blocking and unblocking; new users; and the /name and /help commands
     """
 
     def __init__(self, fname: str = "users.json") -> None:
         self.fname = fname
-        self.log: Dict[int, Dict[str, Event]] = defaultdict(dict)
-        self.out_log: Dict[int, Dict[str, Event]] = defaultdict(dict)
-        self.state: State = defaultdict(deque)
+        self.received_messages: Dict[int, Dict[str, Event]] = defaultdict(dict)
+        self.sent_messages: Dict[int, Dict[str, Event]] = defaultdict(dict)
+        self.user_callbacks: Dict[str, Callback] = {}
 
-    # so that it can be mocked out in test
+    # it's like this so it can be mocked out in tests
     Popen = Popen
 
     def __enter__(self) -> "WhispererBase":
@@ -122,41 +117,57 @@ class WhispererBase:
     def do_name(self, event: Event) -> str:
         """/name [name]. set or change your name"""
         name = event["arg1"]
-        if name in self.user_names.inverse:
+        if name in self.user_names.inverse or name.endswith("proxied"):
             return (
                 f"'{name}' is already taken, use /name to set a different name"
             )
         self.user_names[event["sender"]] = name
         return f"other users will now see you as {name}"
 
-    def followup(self, number: str, message: str, hook: Callable) -> None:
-        if not self.state[number]:
-            self.send(number, message)
-            self.state[number].append(hook)
-        else:
-            hooked = self.state[number].pop()
+    def register_callback(
+        self, user: str, prompt: str, callback: Callable
+    ) -> None:
+        """
+        sends prompt to user. the user's response will be dispatched to
+        the given callback instead of the usual flow.
+        if there's already a callback registered for this user, the prompt
+        will only be sent after that callback is resolved.
+        """
+        if user in self.user_callbacks:
+            previous_callback = self.user_callbacks.pop(user)
 
-            def followup_wrapper(event: Event) -> Optional[str]:
-                resp = hooked(event)
+            def callback_bundle(event: Event) -> Optional[str]:
+                """
+                dispatches the user's response to the previous callback, then
+                sends the prompt for the next callback and registers that
+                """
+                resp = previous_callback(event)
                 if resp:
-                    self.send(number, resp)
-                self.state[number].append(hook)
-                return message
+                    self.send(user, resp)
+                self.user_callbacks[user] = callback
+                return prompt
 
-            self.state[number].append(followup_wrapper)
+            self.user_callbacks[user] = callback_bundle
+        else:
+            self.send(user, prompt)
+            self.user_callbacks[user] = callback
 
     def send(self, recipient: str, message: str, force: bool = False) -> None:
+        """
+        sends a message to recipient. if force is false, checks that the user
+        hasn't blocked messages from whispr, and prompts new users for a name
+        """
         assert self.signal_proc.stdin
         if force or recipient not in self.blocked and message:
             if not force and recipient not in self.user_names:
                 self.user_names[recipient] = recipient
                 self.send(
                     recipient,
-                    "welcome to whispr. "
+                    "welcome to whispr, a social media that runs on signal. "
                     "text STOP or BLOCK to not receive messages",
                 )
                 self.send(recipient, message)
-                self.followup(
+                self.register_callback(
                     recipient, "what would you like to be called?", self.do_name
                 )
             else:
@@ -169,39 +180,48 @@ class WhispererBase:
     for i in range(20):
         fib.append(fib[-2] + fib[-1])
 
-    #              self.out_log[event["ts"]][follower] = event
     def receive_reaction(self, event: Event) -> None:
+        """
+        route a reaction to the original message. if the number of reactions
+        that message has is a fibonacci number, notify the message's author
+        this is probably flakey, because signal only gives us timestamps and
+        not message IDs
+        """
         sender = event["sender"]
         sender_name = self.user_names[sender]
         reaction = event["reaction"]
         target_ts = round(reaction["targetTimestamp"] / 1000)
         logging.debug("reaction from %s targeting %s", sender, target_ts)
-        self.log[event["ts"]][sender] = event
+        self.received_messages[event["ts"]][sender] = event
         if reaction["targetAuthor"] == NUMBER:
-            if target_ts in self.out_log:
-                reacted = self.out_log[target_ts][sender]
-                logging.debug("found target message %s", reacted["text"])
-                reacted["reactions"][sender_name] = reaction["emoji"]
-                logging.debug("reactions: %s", repr(reacted["reactions"]))
-                count = len(reacted["reactions"])
+            if target_ts in self.sent_messages:
+                target_message = self.sent_messages[target_ts][sender]
+                logging.debug("found target message %s", target_message["text"])
+                target_message["reactions"][sender_name] = reaction["emoji"]
+                logging.debug("reactions: %s", repr(target_message["reactions"]))
+                count = len(target_message["reactions"])
                 if count in self.fib:
                     logging.debug("sending reaction notif")
-                    # maybe only show reactions that haven't been shown before
+                    # maybe only show reactions that haven't been shown before?
+                    reactions = ", ".join(
+                        f"{name}: {react}"
+                        for name, react in target_message["reactions"].items()
+                    )
                     self.send(
-                        reacted["sender"],
-                        f"reactions to '{reacted['text']}': "
-                        + ", ".join(
-                            f"{name}: {react}"
-                            for name, react in reacted["reactions"].items()
-                        ),
+                        target_message["sender"],
+                        f"reactions to '{target_message ['text']}': {reactions}",
                     )
 
     def receive(self, event: Event) -> None:
+        """
+        dispatch a received message to a command handler or do_default,
+        handling basic SMS-style compliance
+        """
         sender: str = event["sender"]
         text: str = event["text"]
         try:
             event["reactions"] = {}
-            self.log[event["ts"]][sender] = event
+            self.received_messages[event["ts"]][sender] = event
             if text.lower() in ("stop", "block"):
                 self.send(
                     sender,
@@ -223,14 +243,20 @@ class WhispererBase:
                 sender_name = sender
             event["sender_name"] = sender_name
             logging.info("%s: %s says %s", event["ts"], sender_name, text)
-            if self.state[sender]:
+            if sender in self.user_callbacks:
                 event["line"] = event["arg1"] = text
                 event["tokens"] = text.split(" ")
-                resp: Optional[str] = self.state[sender].popleft()(event)
+                resp: Optional[str] = self.user_callbacks.pop(sender)(event)
             elif text.startswith("/"):
                 command, *tokens = text[1:].split(" ")
                 event["tokens"] = tokens
                 event["arg1"] = tokens[0] if tokens else ""
+                if event["arg1"] in self.user_names.inverse:
+                    event["target"] = self.user_names.inverse[event["arg1"]]
+                elif event["arg1"] in self.user_names:
+                    event["target"] = event["arg1"]
+                else:
+                    event["target"] = ""
                 event["line"] = " ".join(tokens)
                 event["command"] = command
                 if hasattr(self, f"do_{command}"):
@@ -252,6 +278,10 @@ class WhispererBase:
             raise
 
     def run(self) -> None:
+        """
+        repeatedly reads json envelopes from signal-cli and massages the fields
+        for receive_reaction and receive
+        """
         assert self.signal_proc.stdout
         while 1:
             line = self.signal_proc.stdout.readline().decode("utf-8")
@@ -265,8 +295,6 @@ class WhispererBase:
                     raise KeyError
                 event["sender"] = envelope["source"]
                 event["ts"] = round(event["timestamp"] / 1000)
-                event["media"] = event["attachments"]
-                event["groupID"] = event["groupInfo"]
                 event = cast(Event, event)
                 if event["reaction"]:
                     self.receive_reaction(event)
@@ -285,6 +313,10 @@ def do_echo(event: Event) -> str:
 
 
 class Whisperer(WhispererBase):
+    """
+    defines the rest of the commands
+    """
+
     def do_default(self, event: Union[Event, Event]) -> None:
         """send a message to your followers"""
         sender = event["sender"]
@@ -294,50 +326,47 @@ class Whisperer(WhispererBase):
         else:
             name = self.user_names[sender]
             for follower in self.followers[sender]:
-                self.out_log[round(time.time())][follower] = event
+                self.sent_messages[round(time.time())][follower] = event
                 self.send(follower, f"{name}: {event['text']}")
-            # ideally react to the message indicating it was sent
+            # ideally react to the message indicating it was sent?
 
     do_echo = staticmethod(do_echo)
 
     def do_follow(self, event: Event) -> str:
         """/follow [number or name]. follow someone"""
         sender = event["sender"]
-        if event["arg1"] in self.user_names.inverse:
-            number = self.user_names.inverse[event["arg1"]]
-        else:
-            number = event["arg1"]
+        number = event["target"] or event["arg1"]
         if not (number.startswith("+") and number[1:].isnumeric()):
-            return f"{number} doesn't look a number. did you include the country code?"
+            return (
+                f"{event['arg1']} doesn't look a number. "
+                "did you include the country code?"
+            )
         if sender not in self.followers[number]:
             self.send(number, f"{event['sender_name']} has followed you")
             self.followers[number].append(sender)
             # offer to follow back?
             return f"followed {event['arg1']}"
-        return f"you're already following {number}"
+        return f"you're already following {event['arg1']}"
 
     def do_invite(self, event: Event) -> str:
         """
         /invite [number or name]. invite someone to follow you
         """
-        if event["arg1"] in self.user_names.inverse:
-            number = self.user_names.inverse[event["arg1"]]
-        else:
-            number = event["arg1"]
+        number = event["target"] or event["arg1"]
         if number not in self.followers[event["sender"]]:
-            self.followup(
+            self.register_callback(
                 number,
                 f"{event['sender_name']} invited you to follow them on whispr. "
                 "text (y)es or (n)o to accept",
-                self.invite_respond(event["sender"]),
+                self.create_response_callback(event["sender"]),
             )
             return f"invited {event['arg1']}"
         return f"you're already following {event['arg1']}"
 
-    def invite_respond(self, inviter: str) -> Callable:
+    def create_response_callback(self, inviter: str) -> Callback:
         inviter_name = self.user_names[inviter]
 
-        def invited(event: Event) -> str:
+        def response_callback(event: Event) -> str:
             response = event["text"].lower()
             if response in "yes":  # matches substrings!
                 self.followers[inviter].append(event["sender"])
@@ -351,7 +380,7 @@ class Whisperer(WhispererBase):
                 f"`/follow {inviter_name}`"
             )
 
-        return invited
+        return response_callback
 
     def do_followers(self, event: Event) -> str:
         """/followers. list your followers"""
@@ -377,10 +406,7 @@ class Whisperer(WhispererBase):
     # maybe softblock/unfollow followers/following should reuse code somehow?
     def do_softblock(self, event: Event) -> str:
         """/softblock [number or name]. removes someone from your followers"""
-        if event["arg1"] in self.user_names.inverse:
-            number = self.user_names.inverse[event["arg1"]]
-        else:
-            number = event["arg1"]
+        number = event["target"] or event["arg1"]
         if number not in self.followers[event["sender"]]:
             return f"{event['arg1']} isn't following you"
         self.followers[event["sender"]].remove(number)
@@ -388,10 +414,7 @@ class Whisperer(WhispererBase):
 
     def do_unfollow(self, event: Event) -> str:
         """/unfollow [number or name]. unfollow someone"""
-        if event["arg1"] in self.user_names.inverse:
-            number = self.user_names.inverse[event["arg1"]]
-        else:
-            number = event["arg1"]
+        number = event["target"] or event["arg1"]
         if event["sender"] not in self.followers[number]:
             return f"you aren't following {event['arg1']}"
         self.followers[number].remove(event["sender"])
@@ -403,36 +426,44 @@ class Whisperer(WhispererBase):
         for you. you'll receive messages from those number(s) until you leave
         proxy mode
         """
-        proxier = event["sender_name"]
-        number = event["sender"]
-        if number not in self.admins:
+        proxied_name = event["sender_name"]
+        proxied = event["sender"]
+        if proxied not in self.admins:
             return "you must be an admin to use this command"
-        self.user_names[number] = proxier + "proxied"
-        # should be caught by the followup
-        assert not proxier.endswith("proxied")
+        self.user_names[proxied] = proxied_name + "proxied"
+        # should be caught by the callback
+        assert not proxied_name.endswith("proxied")
 
-        def take_response(event: Event) -> None:
-            if self.user_names[number].endswith("proxied"):
-                self.send(number, event["sender_name"] + ": " + event["text"])
-                self.followup(event["sender"], "", take_response)
+        def response_callback(event: Event) -> None:
+            """
+            send responses to the proxied user, re-registering this callback
+            until that user stops being proxied
+            """
+            if self.user_names[proxied].endswith("proxied"):
+                self.send(proxied, event["sender_name"] + ": " + event["text"])
+                self.register_callback(event["sender"], "", response_callback)
             else:
                 self.send(event["sender"], "")
                 self.receive(event)
 
-        def proxy(event: Event) -> Optional[str]:
+        def proxy_callback(event: Event) -> Optional[str]:
+            """
+            parse responses as recipient:message to be forwarded
+            recipients' responses will be sent back to the proxied user
+            """
             if event["text"].startswith("/proxy"):
-                self.user_names[number] = proxier
+                self.user_names[proxied] = proxied_name
                 return "exited proxy mode"
             target, msg = event["text"].split(":", 1)
             self.send(target, msg, force=True)
-            if take_response not in self.state[target]:
-                self.followup(target, "", take_response)
-            self.followup(number, "sent", proxy)
+            if self.user_callbacks.get(target, None) is not response_callback:
+                self.register_callback(target, "", response_callback)
+            self.register_callback(proxied, "sent", proxy_callback)
             return None
 
-        if proxy not in self.state[number]:
-            self.followup(number, "", proxy)
-            return "entered proxy mode"
+        if self.user_callbacks.get(proxied, None) is not proxy_callback:
+            self.register_callback(proxied, "", proxy_callback)
+        return "entered proxy mode"
 
 
 # dissappearing messages

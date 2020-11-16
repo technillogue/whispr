@@ -162,7 +162,7 @@ def test_cache(caplog: Any) -> None:
         with pytest.raises(Exception, match="nothing to read"):
             wisp.run_with_input(inbox)
         assert wisp.take_outbox_for(carol) == [
-            "welcome to whispr. text STOP or BLOCK to not receive messages",
+            "welcome to whispr, a social media that runs on signal. text STOP or BLOCK to not receive messages",
             "bob has followed you",
             "what would you like to be called?",
             "other users will now see you as carol",
@@ -202,7 +202,7 @@ def test_new_user() -> None:
     wisp = MockWhisperer()
     wisp.input(nancy, "hi")
     assert wisp.take_outbox_for(nancy) == [
-        "welcome to whispr. text STOP or BLOCK to not receive messages",
+        "welcome to whispr, a social media that runs on signal. text STOP or BLOCK to not receive messages",
         "hi yourself",
         "what would you like to be called?",
     ]
@@ -226,7 +226,9 @@ def test_follow() -> None:
     wisp.input(bob, "hi leatrice")
     assert wisp.take_outbox_for(leatrice) == ["bob: hi leatrice"]
     wisp.check_in_out(bob, "/follow leatrice", "followed leatrice")
-    wisp.check_in_out(bob, "/follow leatrice", "you're already following leatrice")
+    wisp.check_in_out(
+        bob, "/follow leatrice", "you're already following leatrice"
+    )
     wisp.check_in_out(
         bob,
         "/follow 11",
@@ -355,7 +357,7 @@ def test_silly_error() -> None:
     with pytest.raises(NotImplementedError):
         WhispererBase().do_default({})
     wisp = MockWhisperer()
-    wisp.log = None  # type: ignore
+    wisp.received_messages = None  # type: ignore
     expected_error = "'NoneType' object is not subscriptable"
     with pytest.raises(TypeError, match=expected_error):
         wisp.input(alice, "hi")

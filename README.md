@@ -3,14 +3,13 @@
 
 # whispr
 
-public server: +14848134069
+a [signal](https://signal.org/en/download/) bot that runs a little social media. use commands to follow other users or invite them to follow you. messages to whisprbot that don't start with `/` are posts, and will be sent to your followers. unlike a group chat, your followers cannot see who else follows you, and have fine-grained control over who to get messages from. use `/help` for on-line documentation.
 
-a signal bot that runs a little social media. use commands to follow other users or invite them to follow you. messages to whisprbot that don't start with `/` are posts, and will be sent to your followers. unlike a group chat, your followers cannot see who else follows you, and have fine-grained control over who to get messages from. use `/help` for on-line documentation.
-
+to use the public server, send a signal message to +14848134069
 
 ## installation 
 
-whispr now uses a patched version of [signal-cli](https://github.com/techillogue/signal-cli) that uses stdin/stdout instead of dbus, which you must build to run a server yourself. at some point it'll be possible to download a distribution tarball, but that doesn't seem to work yet.
+whispr launches a patched [signal-cli](https://github.com/technillogue/signal-cli) subprocess to receive and send messages that uses stdin/stdout instead of the upstream DBus protocol. you must build it to run a server yourself. at some point it'll be possible to download a distribution tarball, but that doesn't seem to work yet. 
 
 ```sh
 git clone https://github.com/technillogue/signal-cli

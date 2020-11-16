@@ -51,7 +51,7 @@ zoe = "+" + "9" * 11  # follows yoric
 
 class MockWhisperer(Whisperer):
     def __init__(self, fname: str = "mock_users.json", empty: bool = False):
-        Whisperer.Popen = MockSignalProc # type: ignore
+        Whisperer.Popen = MockSignalProc  # type: ignore
         super().__init__()
         self.fname = fname
         self.__enter__()
@@ -182,12 +182,12 @@ def test_cache(caplog: Any) -> None:
             "i'll stop messaging you. text START or UNBLOCK to resume texts",
         ]
     assert [
-        "started signal-cli process", # __init__ calls __enter__
+        "started signal-cli process",  # __init__ calls __enter__
         "started signal-cli process",
         "signal-cli says: spam",
         "can't decode {",
         "not a datamessage: " + json.dumps({"envelope": {}}),
-        "killed signal-cli process"
+        "killed signal-cli process",
     ] == [rec.message for rec in caplog.records]
     assert json.load(open("mock_users.json")) == [
         {alice: "alice", bob: "bob", carol: "carol", nancy: nancy},

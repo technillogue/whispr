@@ -67,7 +67,7 @@ class WhispererBase:
         try:
             user_names, followers, blocked = json.load(open(self.fname))
         except FileNotFoundError:
-            logging.warning("didn't find saved user data")
+            logging.info("didn't find saved user data")
             user_names, followers, blocked = [{}, {}, []]
         try:
             self.admins = json.load(open("admins"))

@@ -1,4 +1,4 @@
-from typing import List, Set, Any
+from typing import List, Set, Any, cast
 from collections import defaultdict
 import json
 import os
@@ -54,7 +54,8 @@ class MockWhisperer(Whisperer):
         Whisperer.Popen = MockSignalProc  # type: ignore
         super().__init__(fname)
         self.__enter__()
-        if empty: # should load mock_users.json
+        if empty:  # should load mock_users.json
+            self.user_names = cast(bidict, {}) # fuck pylint/mypy
             self.user_names = bidict()
             self.followers = defaultdict(list)
         self.blocked: Set[str] = set()
@@ -147,6 +148,7 @@ def test_cache(caplog: Any) -> None:
         open("testing_users.json", "w"),
     )
     with wisp:
+        assert wisp.followers[alice] == [bob]
         with pytest.raises(Exception, match="nothing to read"):
             wisp.run_with_input(inbox)
         assert wisp.take_outbox_for(carol) == [

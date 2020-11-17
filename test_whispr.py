@@ -1,4 +1,4 @@
-from typing import List, Set, Any, Union, cast
+from typing import List, Set, Any, Optional, cast
 from collections import defaultdict
 import json
 import time
@@ -6,7 +6,8 @@ import os
 import inspect
 import logging
 import pytest
-from whispr import Whisperer, WhispererBase, bidict, NUMBER
+import whispr
+from whispr import Message, bidict, SERVER_NUMBER
 
 
 class FakePipe:
@@ -14,8 +15,8 @@ class FakePipe:
         self.mock_signal = mock_signal
 
     def write(self, b: bytes) -> None:
-        msg = b.decode("utf-8").strip()
-        self.mock_signal.outbox.append(msg.split(":", 1))
+        written = b.decode("utf-8").strip()
+        self.mock_signal.outbox.append(written.split(":", 1))
 
     def flush(self) -> None:
         pass
@@ -38,9 +39,21 @@ class MockSignalProc:
         pass
 
 
-class MockWhisperer(Whisperer):
+def make_envelope(source: str, msg: Optional[str], **react: Any) -> dict:
+    reaction = react if react else None
+    return {
+        "source": source,
+        "dataMessage": {
+            "timestamp": round(time.time() * 1000),
+            "message": msg,
+            "reaction": reaction,
+        },
+    }
+
+
+class MockWhisperer(whispr.Whisperer):
     def __init__(self, fname: str = "mock_users.json", empty: bool = False):
-        Whisperer.Popen = MockSignalProc  # type: ignore
+        whispr.Whisperer.Popen = MockSignalProc  # type: ignore
         super().__init__(fname)
         self.__enter__()
         if empty:  # should load mock_users.json
@@ -79,17 +92,17 @@ class MockWhisperer(Whisperer):
         assert len(response) == 1
         assert response[0] == correct_response
 
-    def input(self, sender: str, text: str) -> int:
-        ts = round(time.time())
-        self.receive({"sender": sender, "text": text, "ts": ts})
-        return ts
+    def input(self, sender: str, message: str) -> int:
+        msg = Message(self, make_envelope(sender, message))
+        self.receive(msg)
+        return msg.ts
 
-    def input_reaction(self, sender: str, **kwargs: Union[str, int]) -> int:
-        kwargs["targetAuthor"] = NUMBER
+    def input_reaction(self, sender: str, **kwargs: Any) -> int:
+        kwargs["targetAuthor"] = SERVER_NUMBER
         kwargs["targetTimestamp"] = kwargs["ts"] * 1000
-        ts = round(time.time())
-        self.receive_reaction({"sender": sender, "ts": ts, "reaction": kwargs})
-        return ts
+        msg = Message(self, make_envelope(sender, None, **kwargs))
+        self.receive_reaction(msg)
+        return msg.ts
 
 
 @pytest.fixture(name="wisp")
@@ -109,6 +122,9 @@ xeres = "+" + "7" * 11  # follows zoe
 yoric = "+" + "8" * 11  # follows xeres
 zoe = "+" + "9" * 11  # follows yoric
 
+# these aren't valid numbers
+whispr.pn.is_valid_number = lambda number: True
+
 posts = [
     "just setting up my whispr",  # https://twitter.com/jack/status/20
     "no",  # https://twitter.com/dril/status/922321981
@@ -123,36 +139,33 @@ Me: this""",  # https://twitter.com/tonyhawk/status/844308362070151168
 ]
 
 
-def test_cache(caplog: Any) -> None:
+def test_run(caplog: Any) -> None:
     caplog.set_level(logging.WARNING)
     wisp = MockWhisperer("testing_users.json", empty=True)
     inputs = [
         (bob, f"/follow {carol}"),
         (carol, "carol"),
+        (carol, "wtf is this"),
         (bob, "/unfollow alice"),
         (carol, "block"),
         (nancy, "unblock"),
     ]
     inbox = [
-        json.dumps(
-            {
-                "envelope": {
-                    "source": source,
-                    "timestamp": 1605478095592,
-                    "dataMessage": {
-                        "timestamp": 1605478095592,
-                        "message": message,
-                        "attachments": [],
-                        "groupInfo": None,
-                        "reaction": None,
-                        "quote": None,
-                    },
-                }
-            }
-        )
+        json.dumps({"envelope": make_envelope(source, message)})
         for source, message in inputs
-    ] + ["spam", "{", json.dumps({"envelope": {}})]
-    # add a reaction in there
+    ] + [
+        "spam",
+        "{",
+        json.dumps({"envelope": {}}),
+    ]
+    reactvelope = make_envelope(
+        bob,
+        None,
+        targetAuthor=SERVER_NUMBER,
+        targetTimestamp=round(time.time() * 1000),
+        emoji="h",
+    )
+    inbox.insert(3, json.dumps({"envelope": reactvelope}))
     json.dump(
         [{alice: "alice", bob: "bob"}, {alice: [bob]}, [nancy]],
         open("testing_users.json", "w"),
@@ -162,10 +175,12 @@ def test_cache(caplog: Any) -> None:
         with pytest.raises(Exception, match="nothing to read"):
             wisp.run_with_input(inbox)
         assert wisp.take_outbox_for(carol) == [
-            "welcome to whispr, a social media that runs on signal. text STOP or BLOCK to not receive messages",
+            "welcome to whispr, a social media that runs on signal. "
+            "text STOP or BLOCK to not receive messages",
             "bob has followed you",
             "what would you like to be called?",
             "other users will now see you as carol",
+            "reactions to 'wtf is this': bob: h",
             "i'll stop messaging you. text START or UNBLOCK to resume texts",
         ]
     assert [
@@ -182,7 +197,7 @@ def test_cache(caplog: Any) -> None:
 
 
 def test_echo(wisp: MockWhisperer) -> None:
-    assert wisp.do_echo({"line": "spam"}) == "spam"
+    wisp.check_in_out(alice, "/echo spam", "spam")
 
 
 def test_stop_start() -> None:
@@ -202,7 +217,8 @@ def test_new_user() -> None:
     wisp = MockWhisperer()
     wisp.input(nancy, "hi")
     assert wisp.take_outbox_for(nancy) == [
-        "welcome to whispr, a social media that runs on signal. text STOP or BLOCK to not receive messages",
+        "welcome to whispr, a social media that runs on signal. "
+        "text STOP or BLOCK to not receive messages",
         "hi yourself",
         "what would you like to be called?",
     ]
@@ -232,7 +248,7 @@ def test_follow() -> None:
     wisp.check_in_out(
         bob,
         "/follow 11",
-        "11 doesn't look a number. did you include the country code?",
+        "11 doesn't look a valid number or user. did you include the country code?",
     )
 
 
@@ -317,7 +333,6 @@ def test_softblock() -> None:
     wisp.check_in_out(alice, "/softblock goofus", "softblocked goofus")
     wisp.input(alice, post3)
     assert wisp.take_outbox_for(goofus) == []
-    wisp.check_in_out(alice, "/softblock nancy", "nancy isn't following you")
     wisp.check_in_out(
         alice, f"/softblock {nancy}", f"{nancy} isn't following you"
     )
@@ -344,19 +359,26 @@ def test_proxy() -> None:
 
 def test_reaction() -> None:
     wisp = MockWhisperer()
+    wisp.followers[alice].extend([xeres, yoric, zoe])
     ts = wisp.input(alice, posts[2])
     wisp.input_reaction(bob, emoji=":)", ts=ts)
+    wisp.input_reaction(bob, emoji=":)", ts=-1)
     assert wisp.take_outbox_for(alice) == [f"reactions to '{posts[2]}': bob: :)"]
     wisp.input_reaction(carol, emoji=":(", ts=ts)
     assert wisp.take_outbox_for(alice) == [
         f"reactions to '{posts[2]}': bob: :), carol: :("
     ]
+    wisp.input_reaction(xeres, emoji="h", ts=ts)
+    wisp.take_outbox_for(alice)
+    wisp.input_reaction(yoric, emoji="h", ts=ts)
+    assert wisp.take_outbox_for(alice) == []
 
 
 def test_silly_error() -> None:
-    with pytest.raises(NotImplementedError):
-        WhispererBase().do_default({})
     wisp = MockWhisperer()
+    with pytest.raises(NotImplementedError):
+        wb = whispr.WhispererBase()
+        wb.do_default(Message(wisp, make_envelope(alice, "hi")))
     wisp.received_messages = None  # type: ignore
     expected_error = "'NoneType' object is not subscriptable"
     with pytest.raises(TypeError, match=expected_error):

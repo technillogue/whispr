@@ -490,14 +490,14 @@ class Whisperer(WhispererBase):
 
         def response_callback(msg: Message) -> None:
             """
-            t send responses to the proxied user, re-registering this callback
-             until that user stops being proxied
+            send responses to the proxied user, re-registering this callback
+            until that user stops being proxied
             """
             if self.user_names[proxied].endswith("proxied"):
-                self.send(proxied, msg.sender_name + ": " + msg.text)
+                text = msg.sender_name + ": " + msg.text
+                self.send(proxied, text, msg.attachments)
                 self.register_callback(msg.sender, "", response_callback)
             else:
-                self.send(msg.sender, "")
                 self.receive(msg)
 
         def proxy_callback(msg: Message) -> Optional[str]:
@@ -509,7 +509,7 @@ class Whisperer(WhispererBase):
                 self.user_names[proxied] = proxied_name
                 return "exited proxy mode"
             target, proxied_message = msg.text.split(":", 1)
-            self.send(target, proxied_message, force=True)
+            self.send(target, proxied_message, msg.attachments, force=True)
             if self.user_callbacks.get(target, None) is not response_callback:
                 self.register_callback(target, "", response_callback)
             self.register_callback(proxied, "sent", proxy_callback)

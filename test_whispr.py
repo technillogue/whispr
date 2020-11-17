@@ -200,8 +200,8 @@ def test_run(caplog: Any) -> None:
         ]
     assert [
         "signal-cli says: spam",
-        "can't decode {",
-        "not a real datamessage: " + json.dumps({"envelope": {}}),
+        "couldn't decode that",
+        "that wasn't a real datamessage",
     ] == [rec.message for rec in caplog.records]
     assert json.load(open("testing_users.json")) == [
         {alice: "alice", bob: "bob", carol: "carol", nancy: nancy},

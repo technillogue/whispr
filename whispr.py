@@ -40,7 +40,7 @@ class Message:
 
     def __init__(self, wisp: "WhispererBase", envelope: dict) -> None:
         msg = envelope["dataMessage"]
-        if not msg or (not msg["message"] and not msg["reaction"]):
+        if not msg or (not msg["message"] and not msg["reaction"] and not msg["attachments"]):
             raise KeyError
 
         self.sender: str = envelope["source"]
@@ -320,16 +320,16 @@ class WhispererBase:
                 logging.warning("signal-cli says: %s", line.strip())
                 continue
             try:
-                logging.info(line)
+                logging.info(line.strip())
                 msg = Message(self, json.loads(line)["envelope"])
                 if msg.reaction:
                     self.receive_reaction(msg)
                 else:
                     self.receive(msg)
             except KeyError:
-                logging.debug("not a real datamessage: %s", line.strip())
+                logging.debug("that wasn't a real datamessage")
             except json.JSONDecodeError:
-                logging.error("can't decode %s", line.strip())
+                logging.error("couldn't  decode that")
 
 
 # def register_command(command: Callable) -> Callable:

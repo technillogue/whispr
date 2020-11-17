@@ -29,6 +29,7 @@ logging.basicConfig(
 
 class Reaction:
     def __init__(self, reaction: dict) -> None:
+        assert reaction
         self.emoji = reaction["emoji"]
         self.author = reaction["targetAuthor"]
         self.ts = round(reaction["targetTimestamp"] / 1000)
@@ -39,17 +40,17 @@ class Message:
 
     def __init__(self, wisp: "WhispererBase", envelope: dict) -> None:
         msg = envelope["dataMessage"]
-        if not msg:
+        if not msg or (not msg["message"] and not msg["reaction"]):
             raise KeyError
 
         self.sender: str = envelope["source"]
         self.sender_name = wisp.user_names.get(self.sender, self.sender)
         self.ts = round(msg["timestamp"] / 1000)
-        self.full_text = self.text = msg.get("message")
-        self.reaction: Optional[Reaction] = None
-        if self.text is None:
-            self.reaction = Reaction(msg.get("reaction"))
-            return
+        self.full_text = self.text = msg.get("message", "")
+        try:
+            self.reaction: Optional[Reaction] = Reaction(msg.get("reaction"))
+        except (AssertionError, KeyError):
+            self.reaction = None
         self.attachments = [
             str(wisp.attachments_dir / attachment["id"])
             for attachment in msg.get("attachments", [])
@@ -319,13 +320,14 @@ class WhispererBase:
                 logging.warning("signal-cli says: %s", line.strip())
                 continue
             try:
+                logging.info(line)
                 msg = Message(self, json.loads(line)["envelope"])
                 if msg.reaction:
                     self.receive_reaction(msg)
                 else:
                     self.receive(msg)
             except KeyError:
-                logging.warning("not a datamessage: %s", line.strip())
+                logging.debug("not a real datamessage: %s", line.strip())
             except json.JSONDecodeError:
                 logging.error("can't decode %s", line.strip())
 

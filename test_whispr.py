@@ -10,8 +10,10 @@ import whispr
 from whispr import Message, bidict, SERVER_NUMBER
 
 
-class OutgoingMessage(UserString):
-    def __init__(self, signal_command: dict) -> None:
+class OutgoingMessage(UserString):  # pylint: disable=too-many-ancestors
+    def __init__(  # pylint: disable=super-init-not-called
+        self, signal_command: dict
+    ) -> None:
         self.attachments = signal_command.get("details", {}).get("attachments")
         self.recipient = signal_command["recipient"]
         self.data = signal_command["content"]
@@ -199,7 +201,7 @@ def test_run(caplog: Any) -> None:
     assert [
         "signal-cli says: spam",
         "can't decode {",
-        "not a datamessage: " + json.dumps({"envelope": {}}),
+        "not a real datamessage: " + json.dumps({"envelope": {}}),
     ] == [rec.message for rec in caplog.records]
     assert json.load(open("testing_users.json")) == [
         {alice: "alice", bob: "bob", carol: "carol", nancy: nancy},

@@ -1,5 +1,5 @@
-from typing import List, Set, Any, Optional, cast
-from collections import defaultdict
+from typing import List, Set, Any, Optional as Opt, cast
+from collections import defaultdict, UserString
 import json
 import time
 import os
@@ -10,13 +10,20 @@ import whispr
 from whispr import Message, bidict, SERVER_NUMBER
 
 
+class OutgoingMessage(UserString):
+    def __init__(self, signal_command: dict) -> None:
+        self.attachments = signal_command.get("details", {}).get("attachments")
+        self.recipient = signal_command["recipient"]
+        self.data = signal_command["content"]
+
+
 class FakePipe:
     def __init__(self, mock_signal: "MockSignalProc") -> None:
         self.mock_signal = mock_signal
 
     def write(self, b: bytes) -> None:
-        written = b.decode("utf-8").strip()
-        self.mock_signal.outbox.append(written.split(":", 1))
+        signal_command = json.loads(b.decode("utf-8").strip())
+        self.mock_signal.outbox.append(OutgoingMessage(signal_command))
 
     def flush(self) -> None:
         pass
@@ -30,7 +37,7 @@ class FakePipe:
 class MockSignalProc:
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         del args, kwargs
-        self.outbox: List[List[str]] = []
+        self.outbox: List[OutgoingMessage] = []
         self.inbox: List[str] = []
         self.stdout = FakePipe(self)
         self.stdin = FakePipe(self)
@@ -39,14 +46,18 @@ class MockSignalProc:
         pass
 
 
-def make_envelope(source: str, msg: Optional[str], **react: Any) -> dict:
-    reaction = react if react else None
+def make_envelope(
+    source: str, msg: Opt[str], attach: Opt[List[str]] = None, **react: Any
+) -> dict:
+    reaction: Opt[dict] = react if react else None
+    attachments = attach if attach else []
     return {
         "source": source,
         "dataMessage": {
             "timestamp": round(time.time() * 1000),
             "message": msg,
             "reaction": reaction,
+            "attachments": [{"id": attachment} for attachment in attachments],
         },
     }
 
@@ -67,14 +78,14 @@ class MockWhisperer(whispr.Whisperer):
         self.signal_proc.inbox = events
         self.run()
 
-    def take_outbox_for(self, number: str) -> List[str]:
+    def take_outbox_for(self, number: str) -> List[OutgoingMessage]:
         assert isinstance(self.signal_proc, MockSignalProc)
         taken, kept = [], []
-        for recipient, text in self.signal_proc.outbox:
-            if recipient == number:
-                taken.append(text)
+        for msg in self.signal_proc.outbox:
+            if msg.recipient == number:
+                taken.append(msg)
             else:
-                kept.append((recipient, text))
+                kept.append(msg)
         self.signal_proc.outbox = kept
         return taken
 
@@ -92,8 +103,10 @@ class MockWhisperer(whispr.Whisperer):
         assert len(response) == 1
         assert response[0] == correct_response
 
-    def input(self, sender: str, message: str) -> int:
-        msg = Message(self, make_envelope(sender, message))
+    def input(
+        self, sender: str, message: str, attachments: Opt[List[str]] = None
+    ) -> int:
+        msg = Message(self, make_envelope(sender, message, attachments))
         self.receive(msg)
         return msg.ts
 
@@ -285,7 +298,7 @@ def test_invite_unfollow() -> None:
     )
 
 
-def test_multiple_followers(wisp: MockWhisperer) -> None:
+def test_default(wisp: MockWhisperer) -> None:
     wisp.input(alice, posts[0])
     assert (
         wisp.take_outbox_for(bob)
@@ -296,6 +309,11 @@ def test_multiple_followers(wisp: MockWhisperer) -> None:
     reply = "@alice what is this, 2006?"
     wisp.input(bob, reply)
     assert wisp.take_outbox_for(alice) == ["bob: " + reply]
+    attachments = ["wakeup.jpg", "loss.png"]
+    wisp.input(xeres, posts[3], attachments)
+    assert wisp.take_outbox_for(yoric)[0].attachments == [
+        str(wisp.attachments_dir / attachment) for attachment in attachments
+    ]
 
 
 def test_help(wisp: MockWhisperer) -> None:

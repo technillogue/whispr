@@ -11,6 +11,8 @@ from typing import (
 from collections import defaultdict
 from textwrap import dedent
 from subprocess import Popen, PIPE
+from functools import wraps
+import pathlib
 import json
 import time
 import logging
@@ -43,25 +45,30 @@ class Message:
         self.sender: str = envelope["source"]
         self.sender_name = wisp.user_names.get(self.sender, self.sender)
         self.ts = round(msg["timestamp"] / 1000)
-        self.text = msg.get("message")
-        self.target_number: Optional[str] = None
+        self.full_text = self.text = msg.get("message")
         self.reaction: Optional[Reaction] = None
         if self.text is None:
             self.reaction = Reaction(msg.get("reaction"))
             return
+        self.attachments = [
+            str(wisp.attachments_dir / attachment["id"])
+            for attachment in msg.get("attachments", [])
+        ]
+
         self.reactions: Dict[str, str] = {}
         self.command: Optional[str] = None
         self.tokens: Optional[List[str]] = None
         if self.sender in wisp.user_callbacks:
-            self.tokens = self.text.split()
+            self.tokens = self.text.split(" ")
         elif self.text.startswith("/"):
             command, *self.tokens = self.text.split(" ")
             self.command = command[1:]  # remove /
             self.text = " ".join(self.tokens)
+
         self.arg1 = self.tokens[0] if self.tokens else None
 
     def __repr__(self) -> str:
-        return f"<{self.sender_name}: {self.text}>"
+        return f"<{self.sender_name}: {self.full_text}>"
 
 
 Callback = Callable[[Message], Optional[str]]
@@ -98,6 +105,9 @@ class WhispererBase:
         self.user_names = bidict(user_names)
         self.followers = defaultdict(list, followers)
         self.blocked: Set[str] = set(blocked)
+        self.attachments_dir = (
+            pathlib.Path.home() / ".local/share/signal-cli/attachments"
+        )
         self.signal_proc = self.Popen(
             SIGNAL_CLI, stdin=PIPE, stdout=PIPE, stderr=PIPE
         )
@@ -130,7 +140,10 @@ class WhispererBase:
                 return f"no such command '{msg.arg1}'"
         else:
             resp = "documented commands: " + ", ".join(
-                name[3:] for name in dir(self) if name.startswith("do_")
+                name[3:]
+                for name in dir(self)
+                if name.startswith("do_")
+                and not hasattr(getattr(self, name), "admin")
             )
         return resp
 
@@ -175,7 +188,13 @@ class WhispererBase:
             self.send(user, prompt)
             self.user_callbacks[user] = callback
 
-    def send(self, recipient: str, message: str, force: bool = False) -> None:
+    def send(
+        self,
+        recipient: str,
+        message: str,
+        attachments: Optional[List[str]] = None,
+        force: bool = False,
+    ) -> None:
         """
         sends a message to recipient. if force is false, checks that the user
         hasn't blocked messages from whispr, and prompts new users for a name
@@ -194,8 +213,15 @@ class WhispererBase:
                     recipient, "what would you like to be called?", self.do_name
                 )
             else:
+                command: Dict[str, Any] = dict(
+                    commandName="sendMessage",
+                    recipient=recipient,
+                    content=message,
+                )
+                if attachments:
+                    command["details"] = {"attachments": attachments}
                 self.signal_proc.stdin.write(
-                    bytes(f"{recipient}:{message}\n", "utf-8")
+                    json.dumps(command).encode("utf-8") + b"\n"
                 )
                 self.signal_proc.stdin.flush()
 
@@ -257,7 +283,9 @@ class WhispererBase:
                     return
                 self.send(msg.sender, "you weren't blocked")
                 return
-            logging.info("%s: %s says %s", msg.ts, msg.sender_name, msg.text)
+            logging.info(
+                "%s: %s says %s", msg.ts, msg.sender_name, msg.full_text
+            )
             if msg.sender in self.user_callbacks:
                 resp: Optional[str] = self.user_callbacks.pop(msg.sender)(msg)
             elif msg.command:
@@ -302,24 +330,42 @@ class WhispererBase:
                 logging.error("can't decode %s", line.strip())
 
 
+# def register_command(command: Callable) -> Callable:
+#     command.is_command = True
+#     command.name = command.__name__[3:]
+#     return command
+# class Command:
+#     def __init__
+
+
 def takes_number(command: Callable) -> Callable:
+    @wraps(command)  # keeps original name and docstring for /help
     def wrapped_command(self: WhispererBase, msg: Message) -> str:
         if msg.arg1 in self.user_names.inverse:
-            msg.target_number = self.user_names.inverse[msg.arg1]
-            return command(self, msg)
+            target_number = self.user_names.inverse[msg.arg1]
+            return command(self, msg, target_number)
         try:
             parsed = pn.parse(msg.arg1, None)
             assert pn.is_valid_number(parsed)
-            msg.target_number = pn.format_number(
-                parsed, pn.PhoneNumberFormat.E164
-            )
-            return command(self, msg)
+            target_number = pn.format_number(parsed, pn.PhoneNumberFormat.E164)
+            return command(self, msg, target_number)
         except (pn.phonenumberutil.NumberParseException, AssertionError):
             return (
                 f"{msg.arg1} doesn't look a valid number or user. "
                 "did you include the country code?"
             )
 
+    return wrapped_command
+
+
+def admin(command: Callable) -> Callable:
+    @wraps(command)
+    def wrapped_command(self: WhispererBase, msg: Message) -> str:
+        if msg.sender in self.admins:
+            return command(self, msg)
+        return "you must be an admin to use this command"
+
+    wrapped_command.admin = True  # type: ignore
     return wrapped_command
 
 
@@ -342,31 +388,29 @@ class Whisperer(WhispererBase):
             name = self.user_names[msg.sender]
             for follower in self.followers[msg.sender]:
                 self.sent_messages[round(time.time())][follower] = msg
-                self.send(follower, f"{name}: {msg.text}")
+                self.send(follower, f"{name}: {msg.text}", msg.attachments)
             # ideally react to the message indicating it was sent?
 
     do_echo = staticmethod(do_echo)
 
     @takes_number
-    def do_follow(self, msg: Message) -> str:
+    def do_follow(self, msg: Message, target_number: str) -> str:
         """/follow [number or name]. follow someone"""
-        assert msg.target_number
-        if msg.sender not in self.followers[msg.target_number]:
-            self.send(msg.target_number, f"{msg.sender_name} has followed you")
-            self.followers[msg.target_number].append(msg.sender)
+        if msg.sender not in self.followers[target_number]:
+            self.send(target_number, f"{msg.sender_name} has followed you")
+            self.followers[target_number].append(msg.sender)
             # offer to follow back?
             return f"followed {msg.arg1}"
         return f"you're already following {msg.arg1}"
 
     @takes_number
-    def do_invite(self, msg: Message) -> str:
+    def do_invite(self, msg: Message, target_number: str) -> str:
         """
         /invite [number or name]. invite someone to follow you
         """
-        assert msg.target_number
-        if msg.target_number not in self.followers[msg.sender]:
+        if target_number not in self.followers[msg.sender]:
             self.register_callback(
-                msg.target_number,
+                target_number,
                 f"{msg.sender_name} invited you to follow them on whispr. "
                 "text (y)es or (n)o to accept",
                 self.create_response_callback(msg.sender),
@@ -414,23 +458,20 @@ class Whisperer(WhispererBase):
             return "you aren't following anyone"
         return following
 
-    # maybe softblock/unfollow followers/following should reuse code somehow?
     @takes_number
-    def do_softblock(self, msg: Message) -> str:
+    def do_softblock(self, msg: Message, target_number: str) -> str:
         """/softblock [number or name]. removes someone from your followers"""
-        assert msg.target_number
-        if msg.target_number not in self.followers[msg.sender]:
+        if target_number not in self.followers[msg.sender]:
             return f"{msg.arg1} isn't following you"
-        self.followers[msg.sender].remove(msg.target_number)
+        self.followers[msg.sender].remove(target_number)
         return f"softblocked {msg.arg1}"
 
     @takes_number
-    def do_unfollow(self, msg: Message) -> str:
-        """/unfollow [msg.target_number or name]. unfollow someone"""
-        assert msg.target_number
-        if msg.sender not in self.followers[msg.target_number]:
+    def do_unfollow(self, msg: Message, target_number: str) -> str:
+        """/unfollow [target_number or name]. unfollow someone"""
+        if msg.sender not in self.followers[target_number]:
             return f"you aren't following {msg.arg1}"
-        self.followers[msg.target_number].remove(msg.sender)
+        self.followers[target_number].remove(msg.sender)
         return f"unfollowed {msg.arg1}"
 
     def do_proxy(self, msg: Message) -> str:
@@ -477,6 +518,13 @@ class Whisperer(WhispererBase):
         if self.user_callbacks.get(proxied, None) is not proxy_callback:
             self.register_callback(proxied, "", proxy_callback)
         return "entered proxy mode"
+
+    @admin
+    def do_debug(self, msg: Message) -> str:  # pylint: disable=no-self-use
+        try:
+            return eval(msg.text)  # pylint: disable=eval-used
+        except Exception as e:  # pylint: disable=broad-except
+            return str(e)
 
 
 # dissappearing messages

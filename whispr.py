@@ -39,10 +39,9 @@ class Message:
     """parses signal-cli output"""
 
     def __init__(self, wisp: "WhispererBase", envelope: dict) -> None:
-        msg = envelope["dataMessage"]
-        if not msg or (not msg["message"] and not msg["reaction"] and not msg["attachments"]):
+        msg = envelope.get("dataMessage", {})
+        if not any(msg.get(k) for k in ("message", "reaction", "attachment")):
             raise KeyError
-
         self.sender: str = envelope["source"]
         self.sender_name = wisp.user_names.get(self.sender, self.sender)
         self.ts = round(msg["timestamp"] / 1000)
@@ -61,7 +60,7 @@ class Message:
         self.tokens: Optional[List[str]] = None
         if self.sender in wisp.user_callbacks:
             self.tokens = self.text.split(" ")
-        elif self.text.startswith("/"):
+        elif self.text and self.text.startswith("/"):
             command, *self.tokens = self.text.split(" ")
             self.command = command[1:]  # remove /
             self.text = " ".join(self.tokens)
@@ -189,6 +188,8 @@ class WhispererBase:
             self.send(user, prompt)
             self.user_callbacks[user] = callback
 
+    # maybe ideally really abstract out the specific messages and flow?
+
     def send(
         self,
         recipient: str,
@@ -207,7 +208,8 @@ class WhispererBase:
                 self.send(
                     recipient,
                     "welcome to whispr, a social media that runs on signal. "
-                    "text STOP or BLOCK to not receive messages",
+                    "text STOP or BLOCK to not receive messages. type /help "
+                    "to view available commands."
                 )
                 self.send(recipient, message)
                 self.register_callback(
@@ -327,9 +329,9 @@ class WhispererBase:
                 else:
                     self.receive(msg)
             except KeyError:
-                logging.debug("that wasn't a real datamessage")
+                logging.warning("that wasn't a real datamessage")
             except json.JSONDecodeError:
-                logging.error("couldn't  decode that")
+                logging.error("couldn't decode that")
 
 
 # def register_command(command: Callable) -> Callable:
@@ -476,6 +478,7 @@ class Whisperer(WhispererBase):
         self.followers[target_number].remove(msg.sender)
         return f"unfollowed {msg.arg1}"
 
+    @admin
     def do_proxy(self, msg: Message) -> str:
         """
         toggle proxy mode. write number:message pairs and whispr will send them
@@ -484,11 +487,9 @@ class Whisperer(WhispererBase):
         """
         proxied_name = msg.sender_name
         proxied = msg.sender
-        if proxied not in self.admins:
-            return "you must be an admin to use this command"
-        self.user_names[proxied] = proxied_name + "proxied"
-        # should be caught by the callback
+        # should be caught by the callback, but can fail on server restart
         assert not proxied_name.endswith("proxied")
+        self.user_names[proxied] = proxied_name + "proxied"
 
         def response_callback(msg: Message) -> None:
             """
@@ -528,6 +529,13 @@ class Whisperer(WhispererBase):
         except Exception as e:  # pylint: disable=broad-except
             return str(e)
 
+
+    @admin
+    @takes_number
+    def do_forceinvite(self, msg: Message, target_number: str) -> str:
+        self.followers[msg.sender].append(target_number)
+        self.send(target_number, f"you are now following {msg.sender_name}")
+        return f"{msg.arg1} is now following you"
 
 # dissappearing messages
 # emoji?

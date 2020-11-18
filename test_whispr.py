@@ -191,7 +191,8 @@ def test_run(caplog: Any) -> None:
             wisp.run_with_input(inbox)
         assert wisp.take_outbox_for(carol) == [
             "welcome to whispr, a social media that runs on signal. "
-            "text STOP or BLOCK to not receive messages",
+            "text STOP or BLOCK to not receive messages. type /help "
+            "to view available commands.",
             "bob has followed you",
             "what would you like to be called?",
             "other users will now see you as carol",
@@ -233,7 +234,8 @@ def test_new_user() -> None:
     wisp.input(nancy, "hi")
     assert wisp.take_outbox_for(nancy) == [
         "welcome to whispr, a social media that runs on signal. "
-        "text STOP or BLOCK to not receive messages",
+        "text STOP or BLOCK to not receive messages. type /help "
+        "to view available commands.",
         "hi yourself",
         "what would you like to be called?",
     ]

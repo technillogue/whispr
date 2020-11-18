@@ -39,7 +39,9 @@ class Message:
     """parses signal-cli output"""
 
     def __init__(self, wisp: "WhispererBase", envelope: dict) -> None:
-        msg = envelope.get("dataMessage", {})
+        msg = envelope.get("dataMessage")
+        if not msg:
+            raise KeyError
         if not any(msg.get(k) for k in ("message", "reaction", "attachment")):
             raise KeyError
         self.sender: str = envelope["source"]
@@ -209,7 +211,7 @@ class WhispererBase:
                     recipient,
                     "welcome to whispr, a social media that runs on signal. "
                     "text STOP or BLOCK to not receive messages. type /help "
-                    "to view available commands."
+                    "to view available commands.",
                 )
                 self.send(recipient, message)
                 self.register_callback(
@@ -525,17 +527,19 @@ class Whisperer(WhispererBase):
     @admin
     def do_debug(self, msg: Message) -> str:  # pylint: disable=no-self-use
         try:
-            return eval(msg.text)  # pylint: disable=eval-used
+            return str(eval(msg.text))  # pylint: disable=eval-used
         except Exception as e:  # pylint: disable=broad-except
             return str(e)
-
 
     @admin
     @takes_number
     def do_forceinvite(self, msg: Message, target_number: str) -> str:
+        if target_number in self.followers[msg.sender]:
+            return f"{msg.arg1} is already following you"
         self.followers[msg.sender].append(target_number)
         self.send(target_number, f"you are now following {msg.sender_name}")
         return f"{msg.arg1} is now following you"
+
 
 # dissappearing messages
 # emoji?

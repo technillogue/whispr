@@ -1,4 +1,4 @@
-![whispr logo](https://raw.githubusercontent.com/technillogue/whispr/main/whispr_avatar.png)
+<img src="https://raw.githubusercontent.com/technillogue/whispr/main/whispr_avatar.png" alt="drawing" width="100"/>
 
 ![checks](https://github.com/technillogue/whispr/workflows/checks/badge.svg)
 [![codecov](https://codecov.io/gh/technillogue/whispr/branch/main/graph/badge.svg?token=bjcvyeVTsL)](https://codecov.io/gh/technillogue/whispr) [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black) 

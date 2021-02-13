@@ -10,12 +10,15 @@ from typing import (
 )
 from collections import defaultdict
 from textwrap import dedent
-from subprocess import Popen, PIPE
 from functools import wraps
+from asyncio.subprocess import PIPE
+import asyncio
 import pathlib
 import json
 import time
+import sys
 import logging
+import requests
 from bidict import bidict
 import phonenumbers as pn
 
@@ -70,8 +73,27 @@ class Message:
     def __repr__(self) -> str:
         return f"<{self.sender_name}: {self.full_text}>"
 
+    def as_dict(self) -> dict:
+        return {
+            attr: getattr(self, attr)
+            for attr in ("text", "sender", "sender_name", "command", "ts")
+        }
+
 
 Callback = Callable[[Message], Optional[str]]
+
+
+class Webhooks:
+    def __init__(self) -> None:
+        self.hooks: list[tuple[str, str]] = []
+
+    def register_webhook(self, condition: str, address: str) -> None:
+        self.hooks.append((condition, address))
+
+    def event(self, msg: Message) -> None:
+        for condition, address in self.hooks:
+            if condition in ("all", msg.command, msg.sender):
+                requests.post(address, data=msg.as_dict())
 
 
 class WhispererBase:
@@ -87,9 +109,9 @@ class WhispererBase:
         # ...messages[timestamp][user] = msg
         self.received_messages: Dict[int, Dict[str, Message]] = defaultdict(dict)
         self.sent_messages: Dict[int, Dict[str, Message]] = defaultdict(dict)
-
-    # it's like this so it can be mocked out in tests
-    Popen = Popen
+        # it's like this so it can be mocked out in tests
+        self.signal_proc: asyncio.subprocess.Process
+        self.webhooks = Webhooks()
 
     def __enter__(self) -> "WhispererBase":
         try:
@@ -108,10 +130,7 @@ class WhispererBase:
         self.attachments_dir = (
             pathlib.Path.home() / ".local/share/signal-cli/attachments"
         )
-        self.signal_proc = self.Popen(
-            SIGNAL_CLI, stdin=PIPE, stdout=PIPE, stderr=PIPE
-        )
-        logging.info("started signal-cli process")
+
         return self
 
     def __exit__(self, _: Any, value: Any, traceback: Any) -> None:
@@ -209,7 +228,7 @@ class WhispererBase:
                     recipient,
                     "welcome to whispr, a social media that runs on signal. "
                     "text STOP or BLOCK to not receive messages. type /help "
-                    "to view available commands."
+                    "to view available commands.",
                 )
                 self.send(recipient, message)
                 self.register_callback(
@@ -293,10 +312,12 @@ class WhispererBase:
                 resp: Optional[str] = self.user_callbacks.pop(msg.sender)(msg)
             elif msg.command:
                 if hasattr(self, f"do_{msg.command}"):
+                    self.webhooks.event(msg)
                     resp = getattr(self, f"do_{msg.command}")(msg)
                 else:
                     resp = f"no such command '{msg.command}'"
             else:
+                self.webhooks.event(msg)
                 resp = self.do_default(msg)  # type: ignore
             if resp is not None:
                 self.send(msg.sender, resp)
@@ -310,14 +331,17 @@ class WhispererBase:
             )
             raise
 
-    def run(self) -> None:
+    async def run(self) -> None:
         """
         repeatedly reads json envelopes from signal-cli and massages the fields
         for receive_reaction and receive
         """
-        assert self.signal_proc.stdout
-        while 1:
-            line = self.signal_proc.stdout.readline().decode("utf-8")
+        self.signal_proc: asyncio.Process = await asyncio.create_subprocess_exec(
+            *SIGNAL_CLI, stdin=PIPE, stdout=PIPE, stderr=PIPE
+        )
+        logging.info("started signal-cli process")
+        while True:
+            line = (await self.signal_proc.stdout.readline()).decode("utf-8")
             if not line.startswith("{"):
                 logging.warning("signal-cli says: %s", line.strip())
                 continue
@@ -332,14 +356,6 @@ class WhispererBase:
                 logging.warning("that wasn't a real datamessage")
             except json.JSONDecodeError:
                 logging.error("couldn't decode that")
-
-
-# def register_command(command: Callable) -> Callable:
-#     command.is_command = True
-#     command.name = command.__name__[3:]
-#     return command
-# class Command:
-#     def __init__
 
 
 def takes_number(command: Callable) -> Callable:
@@ -522,13 +538,14 @@ class Whisperer(WhispererBase):
             self.register_callback(proxied, "", proxy_callback)
         return "entered proxy mode"
 
+    """
     @admin
     def do_debug(self, msg: Message) -> str:  # pylint: disable=no-self-use
         try:
             return eval(msg.text)  # pylint: disable=eval-used
         except Exception as e:  # pylint: disable=broad-except
             return str(e)
-
+    """
 
     @admin
     @takes_number
@@ -537,10 +554,39 @@ class Whisperer(WhispererBase):
         self.send(target_number, f"you are now following {msg.sender_name}")
         return f"{msg.arg1} is now following you"
 
+
+whisperer = Whisperer()
 # dissappearing messages
 # emoji?
 
 
+async def flask_handler() -> None:
+    flask = await asyncio.subprocess.create_subprocess_exec(
+        sys.executable, "listener.py", stdout=PIPE
+    )
+    try:
+        while True:
+            line = (await flask.stdout.readline()).decode("utf-8").strip()
+            try:
+                event = json.loads(line)
+                if event["action"] == "send":
+                    whisperer.send(event["recipient"], event["messege"])
+                elif event["action"] == "register webhook":
+                    whisperer.webhooks.register_webhook(
+                        event["condition"], event["address"]
+                    )
+            except json.JSONDecodeError:
+                logging.warning("flask: %s", line)
+            except KeyError:
+                logging.warning("flask keyerror: %s", line)
+    finally:
+        flask.terminate()
+
+
+async def main() -> None:
+    with whisperer:
+        await asyncio.gather(whisperer.run(), flask_handler())
+
+
 if __name__ == "__main__":
-    with Whisperer() as whisperer:
-        whisperer.run()
+    asyncio.run(main())

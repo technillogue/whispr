@@ -43,7 +43,9 @@ class Message:
 
     def __init__(self, wisp: "WhispererBase", envelope: dict) -> None:
         msg = envelope.get("dataMessage", {})
-        if not any(msg.get(k) for k in ("message", "reaction", "attachment")):
+        if msg is None or not any(
+            msg.get(k) for k in ("message", "reaction", "attachment")
+        ):
             raise KeyError
         self.sender: str = envelope["source"]
         self.sender_name = wisp.user_names.get(self.sender, self.sender)
@@ -88,6 +90,7 @@ class Webhooks:
         self.hooks: list[tuple[str, str]] = []
 
     def register_webhook(self, condition: str, address: str) -> None:
+        logging.warning(f"adding webhook: {condition} to {address}")
         self.hooks.append((condition, address))
 
     def event(self, msg: Message) -> None:
@@ -139,8 +142,8 @@ class WhispererBase:
             open(self.fname, "w"),
         )
         logging.info("dumped user data to %s", self.fname)
-        self.signal_proc.kill()
-        logging.info("killed signal-cli process")
+        self.signal_proc.terminate()
+        logging.info("terminated signal-cli process")
 
     def do_default(self, msg: Message) -> None:
         raise NotImplementedError
@@ -245,7 +248,7 @@ class WhispererBase:
                 self.signal_proc.stdin.write(
                     json.dumps(command).encode("utf-8") + b"\n"
                 )
-                self.signal_proc.stdin.flush()
+                #self.signal_proc.stdin.flush()
 
     fib = [0, 1]
     for i in range(20):
@@ -570,17 +573,18 @@ async def flask_handler() -> None:
             try:
                 event = json.loads(line)
                 if event["action"] == "send":
-                    whisperer.send(event["recipient"], event["messege"])
+                    whisperer.send(event["recipient"], event["message"])
                 elif event["action"] == "register webhook":
                     whisperer.webhooks.register_webhook(
                         event["condition"], event["address"]
                     )
             except json.JSONDecodeError:
                 logging.warning("flask: %s", line)
-            except KeyError:
-                logging.warning("flask keyerror: %s", line)
+            #except KeyError:
+            #    logging.warning("flask keyerror: %s", line)
     finally:
         flask.terminate()
+        print("flask terminated")
 
 
 async def main() -> None:

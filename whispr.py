@@ -115,6 +115,7 @@ class WhispererBase:
         # it's like this so it can be mocked out in tests
         self.signal_proc: asyncio.subprocess.Process
         self.webhooks = Webhooks()
+        self.flask_whitelist = ["+16176088864"]
 
     def __enter__(self) -> "WhispererBase":
         try:
@@ -557,7 +558,19 @@ class Whisperer(WhispererBase):
         self.send(target_number, f"you are now following {msg.sender_name}")
         return f"{msg.arg1} is now following you"
 
+    def do_webhook(self, msg) -> str:
+        """
+        /do_webhook <address>. send messages from you to address as JSON
+        """
+        self.webhooks.register_webhook(msg.sender, msg.tokens[0])
+        return f"registered a webhook for {msg.tokens[0]}"
 
+    def do_whitelist(self, msg: Message) -> str:
+        """
+        /whitelist. allow messages to be sent to you from the public API
+        """
+        self.flask_whitelist.append(msg.sender)
+        return "messages can now be sent to you from the public API"
 whisperer = Whisperer()
 # dissappearing messages
 # emoji?
@@ -572,7 +585,7 @@ async def flask_handler() -> None:
             line = (await flask.stdout.readline()).decode("utf-8").strip()
             try:
                 event = json.loads(line)
-                if event["action"] == "send":
+                if event["action"] == "send" and event["recipient"] in whisperer.flask_whitelist:
                     whisperer.send(event["recipient"], event["message"])
                 elif event["action"] == "register webhook":
                     whisperer.webhooks.register_webhook(

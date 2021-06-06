@@ -20,7 +20,9 @@ from bidict import bidict
 import phonenumbers as pn
 
 SERVER_NUMBER = open("server_number").read().strip()
-SIGNAL_CLI = f"./signal-cli-script -u {SERVER_NUMBER} daemon --json".split()
+SIGNAL_CLI = (
+    f"./signal-cli-script -u {SERVER_NUMBER} --output=json stdio".split()
+)
 
 logging.basicConfig(
     level=logging.DEBUG, format="{levelname}: {message}", style="{"
@@ -161,6 +163,21 @@ class WhispererBase:
         self.user_names[msg.sender] = name
         return f"other users will now see you as {name}"
 
+    @takes_number
+    def do_mkgroup(self, msg: Message, target_number: str) -> str:
+        """make a group to capture proxied DMs"""
+        assert self.signal_proc.stdin
+        create = {
+            "command": "updateGroup",
+            "members": [msg.sender, SERVER_NUMBER],
+            "name": f"{target_number} proxy",
+        }
+        self.signal_proc.stdin.write(json.dumps(create).encode("utf-8") + b"\n")
+        self.signal_proc.stdin.flush()
+        # register a callback to capture the group id
+        # then register infinite callbacks for messages from the target
+        # and... check do_default for messages to a group that's a proxy
+
     def register_callback(
         self, user: str, prompt: str, callback: Callable
     ) -> None:
@@ -272,8 +289,9 @@ class WhispererBase:
         handling basic SMS-style compliance
         """
         try:
+            # if it's a group
             self.received_messages[msg.ts][msg.sender] = msg
-            if msg.text.lower() in ("stop", "block"):
+            if msg.text and msg.text.lower() in ("stop", "block"):
                 self.send(
                     msg.sender,
                     "i'll stop messaging you. "
@@ -281,7 +299,7 @@ class WhispererBase:
                 )
                 self.blocked.add(msg.sender)
                 return
-            if msg.text.lower() in ("start", "unblock"):
+            if msg.text and msg.text.lower() in ("start", "unblock"):
                 if msg.sender in self.blocked:
                     self.blocked.remove(msg.sender)
                     self.send(msg.sender, "welcome back")

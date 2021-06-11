@@ -1,4 +1,4 @@
-#!/usr/bin/python3.9 -i
+#!/usr/bin/python3.9
 from typing import (
     Optional,
     Any,
@@ -229,10 +229,10 @@ class WhispererBase:
                 command: dict[str, Any] = dict(
                     command="send",
                     recipient=[recipient],
-                    content=message,
+                    message=message,
                 )
                 if attachments:
-                    command["details"] = {"attachments": attachments}
+                    command["attachments"] = [attachments]
                 self.signal_line(command)
 
     fib = [0, 1]
@@ -435,7 +435,7 @@ class Whisperer(WhispererBase):
         assert self.signal_proc.stdin
         create = {
             "command": "updateGroup",
-            "members": [msg.sender, SERVER_NUMBER],
+            "member": [msg.sender],
             "name": f"{target_number} proxy",
         }
         self.signal_line(create)

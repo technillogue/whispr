@@ -1,16 +1,13 @@
-#!/usr/bin/python3 -i
+#!/usr/bin/python3.9 -i
 from typing import (
     Optional,
     Any,
-    Dict,
-    Set,
-    List,
     Callable,
     cast,
 )
 from collections import defaultdict
 from textwrap import dedent
-from subprocess import Popen, PIPE
+from subprocess import Popen, PIPE, STDOUT
 from functools import wraps
 import pathlib
 import json
@@ -58,10 +55,10 @@ class Message:
             str(wisp.attachments_dir / attachment["id"])
             for attachment in msg.get("attachments", [])
         ]
-
-        self.reactions: Dict[str, str] = {}
+        self.group_info = envelope.get("groupInfo")
+        self.reactions: dict[str, str] = {}
         self.command: Optional[str] = None
-        self.tokens: Optional[List[str]] = None
+        self.tokens: Optional[list[str]] = None
         if self.sender in wisp.user_callbacks:
             self.tokens = self.text.split(" ")
         elif self.text and self.text.startswith("/"):
@@ -87,10 +84,12 @@ class WhispererBase:
 
     def __init__(self, fname: str = "users.json") -> None:
         self.fname = fname
-        self.user_callbacks: Dict[str, Callback] = {}
+        self.user_callbacks: dict[str, Callback] = {}
         # ...messages[timestamp][user] = msg
-        self.received_messages: Dict[int, Dict[str, Message]] = defaultdict(dict)
-        self.sent_messages: Dict[int, Dict[str, Message]] = defaultdict(dict)
+        self.received_messages: dict[int, dict[str, Message]] = defaultdict(dict)
+        self.sent_messages: dict[int, dict[str, Message]] = defaultdict(dict)
+        self.groupid_to_person: bidict[str, str] = bidict()
+        self.pending_captureds: list[str] = []
 
     # it's like this so it can be mocked out in tests
     Popen = Popen
@@ -108,12 +107,12 @@ class WhispererBase:
         self.user_names = cast(bidict, {})  # tell pylint it's subscriptable
         self.user_names = bidict(user_names)
         self.followers = defaultdict(list, followers)
-        self.blocked: Set[str] = set(blocked)
+        self.blocked: set[str] = set(blocked)
         self.attachments_dir = (
             pathlib.Path.home() / ".local/share/signal-cli/attachments"
         )
         self.signal_proc = self.Popen(
-            SIGNAL_CLI, stdin=PIPE, stdout=PIPE, stderr=PIPE
+            SIGNAL_CLI, stdin=PIPE, stdout=PIPE, stderr=STDOUT
         )
         logging.info("started signal-cli process")
         return self
@@ -126,6 +125,13 @@ class WhispererBase:
         logging.info("dumped user data to %s", self.fname)
         self.signal_proc.kill()
         logging.info("killed signal-cli process")
+
+    def signal_line(self, command: dict) -> None:
+        assert self.signal_proc.stdin
+        line = json.dumps(command).encode("utf-8") + b"\n"
+        self.signal_proc.stdin.write(line)
+        self.signal_proc.stdin.flush()
+        print(line)
 
     def do_default(self, msg: Message) -> None:
         raise NotImplementedError
@@ -163,21 +169,6 @@ class WhispererBase:
         self.user_names[msg.sender] = name
         return f"other users will now see you as {name}"
 
-    @takes_number
-    def do_mkgroup(self, msg: Message, target_number: str) -> str:
-        """make a group to capture proxied DMs"""
-        assert self.signal_proc.stdin
-        create = {
-            "command": "updateGroup",
-            "members": [msg.sender, SERVER_NUMBER],
-            "name": f"{target_number} proxy",
-        }
-        self.signal_proc.stdin.write(json.dumps(create).encode("utf-8") + b"\n")
-        self.signal_proc.stdin.flush()
-        # register a callback to capture the group id
-        # then register infinite callbacks for messages from the target
-        # and... check do_default for messages to a group that's a proxy
-
     def register_callback(
         self, user: str, prompt: str, callback: Callable
     ) -> None:
@@ -213,7 +204,7 @@ class WhispererBase:
         self,
         recipient: str,
         message: str,
-        attachments: Optional[List[str]] = None,
+        attachments: Optional[list[str]] = None,
         force: bool = False,
     ) -> None:
         """
@@ -235,17 +226,14 @@ class WhispererBase:
                     recipient, "what would you like to be called?", self.do_name
                 )
             else:
-                command: Dict[str, Any] = dict(
-                    commandName="sendMessage",
-                    recipient=recipient,
+                command: dict[str, Any] = dict(
+                    command="send",
+                    recipient=[recipient],
                     content=message,
                 )
                 if attachments:
                     command["details"] = {"attachments": attachments}
-                self.signal_proc.stdin.write(
-                    json.dumps(command).encode("utf-8") + b"\n"
-                )
-                self.signal_proc.stdin.flush()
+                self.signal_line(command)
 
     fib = [0, 1]
     for i in range(20):
@@ -290,6 +278,25 @@ class WhispererBase:
         """
         try:
             # if it's a group
+            if msg.group_info and "groupId" in msg.group_info and msg.text:
+                target = self.groupid_to_person[msg.group_info["groupId"]]
+                self.send(target, msg.text, force=True)
+                print("sent to target")
+                return
+            if (
+                msg.sender
+                and msg.sender in self.groupid_to_person.inverse
+                and msg.text
+            ):
+                command = {
+                    "command": "send",
+                    "message": msg.text,
+                    "group": self.groupid_to_person.inverse[msg.sender],
+                }
+                self.signal_line(command)
+                print("sent to group")
+                return
+
             self.received_messages[msg.ts][msg.sender] = msg
             if msg.text and msg.text.lower() in ("stop", "block"):
                 self.send(
@@ -337,13 +344,18 @@ class WhispererBase:
         """
         assert self.signal_proc.stdout
         while 1:
+
             line = self.signal_proc.stdout.readline().decode("utf-8")
             if not line.startswith("{"):
                 logging.warning("signal-cli says: %s", line.strip())
                 continue
             try:
                 logging.info(line.strip())
-                msg = Message(self, json.loads(line)["envelope"])
+                json_output = json.loads(line)
+                if "group" in json_output:
+                    captured = self.pending_captureds.pop()
+                    self.groupid_to_person[json_output["group"]] = captured
+                msg = Message(self, json_output["envelope"])
                 if msg.reaction:
                     self.receive_reaction(msg)
                 else:
@@ -416,6 +428,22 @@ class Whisperer(WhispererBase):
             # ideally react to the message indicating it was sent?
 
     do_echo = staticmethod(do_echo)
+
+    @takes_number
+    def do_mkgroup(self, msg: Message, target_number: str) -> str:
+        """make a group to capture proxied DMs"""
+        assert self.signal_proc.stdin
+        create = {
+            "command": "updateGroup",
+            "members": [msg.sender, SERVER_NUMBER],
+            "name": f"{target_number} proxy",
+        }
+        self.signal_line(create)
+        self.pending_captureds.append(target_number)
+        # register a callback to capture the group id
+        # then register infinite callbacks for messages from the target
+        # and... check do_default for messages to a group that's a proxy
+        return "made a group"
 
     @takes_number
     def do_follow(self, msg: Message, target_number: str) -> str:

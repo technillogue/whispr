@@ -15,15 +15,38 @@ import time
 import logging
 from bidict import bidict
 import phonenumbers as pn
+import requests
+
 
 SERVER_NUMBER = open("server_number").read().strip()
 SIGNAL_CLI = (
     f"./signal-cli-script -u {SERVER_NUMBER} --output=json stdio".split()
 )
+teli = json.load(open("teli"))
+sms_number, token = teli["number"], teli["key"]
+teli_number = "2513552706"
 
 logging.basicConfig(
     level=logging.DEBUG, format="{levelname}: {message}", style="{"
 )
+
+
+def send_sms(source: str, destination: str, message_text: str) -> dict[str, str]:
+    """
+    Send SMS via teliapi.net call and returns the response
+    """
+    payload = {
+        "source": source,
+        "destination": destination,
+        "message": message_text,
+    }
+    response = requests.post(
+        "https://api.teleapi.net/sms/send?token=" + token,
+        data=payload,
+    )
+    response_json = response.json()
+    return response_json
+
 
 
 class Reaction:
@@ -280,7 +303,8 @@ class WhispererBase:
             # if it's a group
             if msg.group_info and "groupId" in msg.group_info and msg.text:
                 target = self.groupid_to_person[msg.group_info["groupId"]]
-                self.send(target, msg.text, force=True)
+                send_sms(target, msg.text)
+                #self.send(target, msg.text, force=True)
                 print("sent to target")
                 return
             if (
@@ -355,6 +379,7 @@ class WhispererBase:
                 if "group" in json_output:
                     captured = self.pending_captureds.pop()
                     self.groupid_to_person[json_output["group"]] = captured
+                    json.dump(self.groupid_to_person.inverse, "number_to_groupid.json")
                 msg = Message(self, json_output["envelope"])
                 if msg.reaction:
                     self.receive_reaction(msg)

@@ -6,14 +6,3 @@
     <textarea name="message" style="width: 40%; height: 20%"></textarea><br/>
     <input type="submit" name="action" value="send">
 </form>
-<hr>
-<form action="#registered_webhook" method="POST">
-	condition:
-    <input type="input" name="condition" value="all"/> <br/>
-    address:
-    <input type="input" name="address" value="http://209.6.154.34/hook_dest" /><br/>
-    <input type="submit" name="action"  value="register webhook"><br/>
-</form>
-<a href="http://209.6.154.34/log">log for /hook_dest</a>
-conditon: all, messages from a specific number, specific commands<br/>
-sends "text", "sender", "sender_name", "command", "ts" via post to address

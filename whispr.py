@@ -104,20 +104,6 @@ class Message:
 Callback = Callable[[Message], Optional[str]]
 
 
-class Webhooks:
-    def __init__(self) -> None:
-        self.hooks: list[tuple[str, str]] = []
-
-    def register_webhook(self, condition: str, address: str) -> None:
-        logging.warning(f"adding webhook: {condition} to {address}")
-        self.hooks.append((condition, address))
-
-    def event(self, msg: Message) -> None:
-        for condition, address in self.hooks:
-            if condition in ("all", msg.command, msg.sender):
-                requests.post(address, data=msg.as_dict())
-
-
 class WhispererBase:
     """
     handles communicating with signal-cli; sending messages; registering
@@ -140,6 +126,7 @@ class WhispererBase:
 
     def __enter__(self) -> "WhispererBase":
         try:
+            # should add groups to this
             user_names, followers, blocked = json.load(open(self.fname))
         except FileNotFoundError:
             logging.info("didn't find saved user data")
@@ -155,7 +142,6 @@ class WhispererBase:
         self.attachments_dir = (
             pathlib.Path.home() / ".local/share/signal-cli/attachments"
         )
-
         return self
 
     def __exit__(self, _: Any, value: Any, traceback: Any) -> None:
@@ -379,7 +365,6 @@ class WhispererBase:
                 "OOPSIE WOOPSIE!! Uwu We made a fucky wucky!!"
                 "A wittle fucko boingo! The code monkeys at our headquarters "
                 "are working VEWY HAWD to fix this!",
-                # source: https://knowyourmeme.com/memes/oopsie-woopsie
             )
             raise
 
@@ -410,7 +395,7 @@ class WhispererBase:
                     self.receive(msg)
             except KeyError:
                 pass
-                #logging.warning("that wasn't a real datamessage")
+                # logging.warning("that wasn't a real datamessage")
             except json.JSONDecodeError:
                 logging.error("couldn't decode that")
 
@@ -640,7 +625,6 @@ async def flask_handler() -> None:
     try:
         while True:
             line = (await flask.stdout.readline()).decode("utf-8").strip()
-            print("got a line from flask")
             try:
                 event = json.loads(line)
                 print(event)
@@ -663,9 +647,6 @@ async def flask_handler() -> None:
             except json.JSONDecodeError:
                 if line:
                     print(line)
-            # logging.warning("flask: %s", line)
-            # except KeyError:
-            #    logging.warning("flask keyerror: %s", line)
     finally:
         flask.terminate()
         print("flask terminated")

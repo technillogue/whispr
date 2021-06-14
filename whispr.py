@@ -7,9 +7,8 @@ from typing import (
 )
 from collections import defaultdict
 from textwrap import dedent
-from subprocess import Popen, PIPE, STDOUT
 from functools import wraps
-from asyncio.subprocess import PIPE
+from asyncio.subprocess import PIPE, Process
 import asyncio
 import pathlib
 import json
@@ -26,19 +25,19 @@ SIGNAL_CLI = (
 )
 teli = json.load(open("teli"))
 sms_number, token = teli["number"], teli["key"]
-teli_number = "2513552706"
 
 logging.basicConfig(
     level=logging.DEBUG, format="{levelname}: {message}", style="{"
 )
 
 
-def send_sms(source: str, destination: str, message_text: str) -> dict[str, str]:
+def send_sms(destination: str, message_text: str) -> dict[str, str]:
     """
     Send SMS via teliapi.net call and returns the response
     """
+    print(f"SMS sending {message_text} to {destination}")
     payload = {
-        "source": source,
+        "source": sms_number,
         "destination": destination,
         "message": message_text,
     }
@@ -48,7 +47,6 @@ def send_sms(source: str, destination: str, message_text: str) -> dict[str, str]
     )
     response_json = response.json()
     return response_json
-
 
 
 class Reaction:
@@ -80,7 +78,7 @@ class Message:
             str(wisp.attachments_dir / attachment["id"])
             for attachment in msg.get("attachments", [])
         ]
-        self.group_info = envelope.get("groupInfo")
+        self.group_info = msg.get("groupInfo")
         self.reactions: dict[str, str] = {}
         self.command: Optional[str] = None
         self.tokens: Optional[list[str]] = None
@@ -137,7 +135,7 @@ class WhispererBase:
         self.pending_captureds: list[str] = []
 
         # it's like this so it can be mocked out in tests
-        self.signal_proc: asyncio.subprocess.Process
+        self.signal_proc: Process
         self.webhooks = Webhooks()
 
     def __enter__(self) -> "WhispererBase":
@@ -173,7 +171,11 @@ class WhispererBase:
         assert self.signal_proc.stdin
         line = json.dumps(command).encode("utf-8") + b"\n"
         self.signal_proc.stdin.write(line)
-        self.signal_proc.stdin.flush()
+        try:
+            self.signal_proc.stdin.flush()
+            # so that it works both sync and async
+        except AttributeError:
+            pass
         print(line)
 
     def do_default(self, msg: Message) -> None:
@@ -324,7 +326,7 @@ class WhispererBase:
             if msg.group_info and "groupId" in msg.group_info and msg.text:
                 target = self.groupid_to_person[msg.group_info["groupId"]]
                 send_sms(target, msg.text)
-                #self.send(target, msg.text, force=True)
+                # self.send(target, msg.text, force=True)
                 print("sent to target")
                 return
             if (
@@ -386,7 +388,7 @@ class WhispererBase:
         repeatedly reads json envelopes from signal-cli and massages the fields
         for receive_reaction and receive
         """
-        self.signal_proc: asyncio.Process = await asyncio.create_subprocess_exec(
+        self.signal_proc = await asyncio.create_subprocess_exec(
             *SIGNAL_CLI, stdin=PIPE, stdout=PIPE, stderr=PIPE
         )
         logging.info("started signal-cli process")
@@ -401,14 +403,14 @@ class WhispererBase:
                 if "group" in json_output:
                     captured = self.pending_captureds.pop()
                     self.groupid_to_person[json_output["group"]] = captured
-                    json.dump(self.groupid_to_person.inverse, "number_to_groupid.json")
                 msg = Message(self, json_output["envelope"])
                 if msg.reaction:
                     self.receive_reaction(msg)
                 else:
                     self.receive(msg)
             except KeyError:
-                logging.warning("that wasn't a real datamessage")
+                pass
+                #logging.warning("that wasn't a real datamessage")
             except json.JSONDecodeError:
                 logging.error("couldn't decode that")
 
@@ -609,14 +611,12 @@ class Whisperer(WhispererBase):
             self.register_callback(proxied, "", proxy_callback)
         return "entered proxy mode"
 
-    """
     @admin
     def do_debug(self, msg: Message) -> str:  # pylint: disable=no-self-use
         try:
             return eval(msg.text)  # pylint: disable=eval-used
         except Exception as e:  # pylint: disable=broad-except
             return str(e)
-    """
 
     @admin
     @takes_number
@@ -640,9 +640,21 @@ async def flask_handler() -> None:
     try:
         while True:
             line = (await flask.stdout.readline()).decode("utf-8").strip()
+            print("got a line from flask")
             try:
                 event = json.loads(line)
-                if event["action"] == "send":
+                print(event)
+                if "sms" in event:
+                    source = "+1" + event["sms"]["source"]
+                    if source in whisperer.groupid_to_person.inverse:
+                        command = {
+                            "command": "send",
+                            "message": event["sms"]["message"],
+                            "group": whisperer.groupid_to_person.inverse[source],
+                        }
+                        whisperer.signal_line(command)
+                        print("sent to group")
+                elif event["action"] == "send":
                     whisperer.send(event["recipient"], event["message"])
                 elif event["action"] == "register webhook":
                     whisperer.webhooks.register_webhook(
@@ -651,7 +663,7 @@ async def flask_handler() -> None:
             except json.JSONDecodeError:
                 if line:
                     print(line)
-               # logging.warning("flask: %s", line)
+            # logging.warning("flask: %s", line)
             # except KeyError:
             #    logging.warning("flask keyerror: %s", line)
     finally:

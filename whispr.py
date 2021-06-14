@@ -6,18 +6,21 @@ from typing import (
     cast,
 )
 from collections import defaultdict
-from textwrap import dedent
 from functools import wraps
+from textwrap import dedent
 from asyncio.subprocess import PIPE, Process
 import asyncio
-import pathlib
+import io
 import json
-import time
-import sys
 import logging
-import requests
+import pathlib
+import sys
+import time
 from bidict import bidict
 import phonenumbers as pn
+import requests
+
+# pylint: disable=too-many-instance-attributes
 
 SERVER_NUMBER = open("server_number").read().strip()
 SIGNAL_CLI = (
@@ -68,7 +71,7 @@ class Message:
             raise KeyError
         self.sender: str = envelope["source"]
         self.sender_name = wisp.user_names.get(self.sender, self.sender)
-        self.ts = round(msg["timestamp"] / 1000)
+        self.ts = round(msg["timestamp"] / 1000)  # needed to resolve quotes
         self.full_text = self.text = msg.get("message", "")
         try:
             self.reaction: Optional[Reaction] = Reaction(msg.get("reaction"))
@@ -79,18 +82,23 @@ class Message:
             for attachment in msg.get("attachments", [])
         ]
         self.group_info = msg.get("groupInfo")
+        self.quoted_text = msg.get("quote", {}).get("text")
+        # quote_ts = msg.get("quote", {}).get("id")
         self.reactions: dict[str, str] = {}
         self.command: Optional[str] = None
-        self.tokens: Optional[list[str]] = None
+        tokens = None
         if self.sender in wisp.user_callbacks:
-            self.tokens = self.text.split(" ")
+            tokens = self.text.split(" ")
         elif self.text and self.text.startswith("/"):
-            command, *self.tokens = self.text.split(" ")
+            command, *tokens = self.text.split(" ")
             self.command = command[1:]  # remove /
-            self.text = " ".join(self.tokens)
+            self.text = " ".join(tokens)
+        self.arg1 = tokens[0] if tokens else None
 
-        self.arg1 = self.tokens[0] if self.tokens else None
-
+    # it might be text
+    # if it's text, it might be a command
+    # or it might be a group, or a quote
+    # or it's a reaction
     def __repr__(self) -> str:
         return f"<{self.sender_name}: {self.full_text}>"
 
@@ -122,7 +130,6 @@ class WhispererBase:
 
         # it's like this so it can be mocked out in tests
         self.signal_proc: Process
-        self.webhooks = Webhooks()
 
     def __enter__(self) -> "WhispererBase":
         try:
@@ -157,11 +164,9 @@ class WhispererBase:
         assert self.signal_proc.stdin
         line = json.dumps(command).encode("utf-8") + b"\n"
         self.signal_proc.stdin.write(line)
-        try:
+        if isinstance(self.signal_proc.stdin, io.BufferedWriter):
             self.signal_proc.stdin.flush()
             # so that it works both sync and async
-        except AttributeError:
-            pass
         print(line)
 
     def do_default(self, msg: Message) -> None:
@@ -328,7 +333,14 @@ class WhispererBase:
                 self.signal_line(command)
                 print("sent to group")
                 return
-
+            # SMS from {number}: {message}
+            if msg.quoted_text and "SMS" in msg.quoted_text:
+                try:
+                    replying_to = msg.quoted_text.strip("SMS from").split(":")[0]
+                    send_sms(replying_to, msg.text)
+                    self.send(msg.sender, f"sent {msg.text} to {replying_to}")
+                except IndexError:
+                    pass
             self.received_messages[msg.ts][msg.sender] = msg
             if msg.text and msg.text.lower() in ("stop", "block"):
                 self.send(
@@ -377,6 +389,7 @@ class WhispererBase:
             *SIGNAL_CLI, stdin=PIPE, stdout=PIPE, stderr=PIPE
         )
         logging.info("started signal-cli process")
+        assert self.signal_proc.stdout and self.signal_proc.stdin
         while True:
             line = (await self.signal_proc.stdout.readline()).decode("utf-8")
             if not line.startswith("{"):
@@ -462,14 +475,14 @@ class Whisperer(WhispererBase):
         create = {
             "command": "updateGroup",
             "member": [msg.sender],
-            "name": f"{target_number} proxy",
+            "name": f"SMS proxy for {target_number}",
         }
         self.signal_line(create)
         self.pending_captureds.append(target_number)
         # register a callback to capture the group id
         # then register infinite callbacks for messages from the target
         # and... check do_default for messages to a group that's a proxy
-        return "made a group"
+        return "invited you to a group"
 
     @takes_number
     def do_follow(self, msg: Message, target_number: str) -> str:
@@ -619,9 +632,21 @@ whisperer = Whisperer()
 
 
 async def flask_handler() -> None:
-    flask = await asyncio.subprocess.create_subprocess_exec(
+    # tunnel = await asyncio.create_subprocess_exec(
+    #     "lt", "-p", "8080", stdout=PIPE
+    # )
+    # your_url = (await tunnel.stdout.readline()).decode().strip("your url is:")
+    # print(your_url)
+    # clip = await asyncio.create_subprocess_exec(["xclip", "-sel", "clip", "-in"], stdin=PIPE)
+    # clip.stdin.write(your_url + "\n")
+    # requests.post(
+    # this is a little batshit and isn't the right endpoint anyway...
+    #    f"​https://apiv1.teleapi.net/user/api/smsurl?token={token}&url={your_url}"
+    # )
+    flask = await asyncio.create_subprocess_exec(
         sys.executable, "listener.py", stdout=PIPE
     )
+    assert flask.stdout
     try:
         while True:
             line = (await flask.stdout.readline()).decode("utf-8").strip()
@@ -638,12 +663,13 @@ async def flask_handler() -> None:
                         }
                         whisperer.signal_line(command)
                         print("sent to group")
-                elif event["action"] == "send":
+                    else:
+                        whisperer.send(
+                            whisperer.admins[0],
+                            f"SMS from {source}: {event['sms']['message']}",
+                        )
+                elif "action" in event and event["action"] == "send":
                     whisperer.send(event["recipient"], event["message"])
-                elif event["action"] == "register webhook":
-                    whisperer.webhooks.register_webhook(
-                        event["condition"], event["address"]
-                    )
             except json.JSONDecodeError:
                 if line:
                     print(line)

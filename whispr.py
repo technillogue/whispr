@@ -1,4 +1,4 @@
-#!/usr/bin/python3 -i
+#!/usr/bin/python3.9
 from typing import (
     Optional,
     Any,
@@ -23,7 +23,7 @@ from bidict import bidict
 import phonenumbers as pn
 
 SERVER_NUMBER = open("server_number").read().strip()
-SIGNAL_CLI = f"./signal-cli-script -u {SERVER_NUMBER} daemon --json".split()
+SIGNAL_CLI = f"./signal-cli-script -u {SERVER_NUMBER} stdio --json".split()
 
 logging.basicConfig(
     level=logging.DEBUG, format="{levelname}: {message}", style="{"
@@ -239,16 +239,16 @@ class WhispererBase:
                 )
             else:
                 command: Dict[str, Any] = dict(
-                    commandName="sendMessage",
-                    recipient=recipient,
-                    content=message,
+                    command="send",
+                    recipient=[recipient],
+                    message=message,
                 )
                 if attachments:
-                    command["details"] = {"attachments": attachments}
+                    command["attachment"] = attachments
                 self.signal_proc.stdin.write(
                     json.dumps(command).encode("utf-8") + b"\n"
                 )
-                #self.signal_proc.stdin.flush()
+                # self.signal_proc.stdin.flush()
 
     fib = [0, 1]
     for i in range(20):
@@ -579,8 +579,10 @@ async def flask_handler() -> None:
                         event["condition"], event["address"]
                     )
             except json.JSONDecodeError:
-                logging.warning("flask: %s", line)
-            #except KeyError:
+                if line:
+                    print(line)
+               # logging.warning("flask: %s", line)
+            # except KeyError:
             #    logging.warning("flask keyerror: %s", line)
     finally:
         flask.terminate()

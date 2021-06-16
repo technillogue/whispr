@@ -5,7 +5,7 @@ from flask import Flask, request, render_template
 app = Flask(__name__, template_folder=".")
 
 
-@app.route("/teli", methods=["POST", "GET"])
+@app.route("/inbound", methods=["POST", "GET"])
 def teli() -> str:
     info = json.dumps({"sms":dict(request.form)})
 #    print(info, file=sys.stderr)
@@ -22,3 +22,5 @@ def index() -> str:
     return render_template("form.html")
 
 app.run(host="0.0.0.0", port=8080)
+
+

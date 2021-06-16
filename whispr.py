@@ -8,9 +8,11 @@ from typing import (
 from collections import defaultdict
 from functools import wraps
 from textwrap import dedent
-from asyncio.subprocess import PIPE, Process
+from asyncio.subprocess import PIPE, Process, STDOUT
+from io import BytesIO, BufferedWriter
+from base64 import urlsafe_b64decode, urlsafe_b64encode
+from tarfile import TarFile
 import asyncio
-import io
 import json
 import logging
 import pathlib
@@ -18,38 +20,18 @@ import sys
 import time
 from bidict import bidict
 import phonenumbers as pn
+import aiohttp
 import requests
+import forest_tables
 
-# pylint: disable=too-many-instance-attributes
+# pylint: disable=too-many-instance-attributes,fixme
 
-SERVER_NUMBER = open("server_number").read().strip()
-SIGNAL_CLI = (
-    f"./signal-cli-script -u {SERVER_NUMBER} --output=json stdio".split()
-)
 teli = json.load(open("teli"))
-sms_number, token = teli["number"], teli["key"]
+_, token = teli["number"], teli["key"]
 
 logging.basicConfig(
     level=logging.DEBUG, format="{levelname}: {message}", style="{"
 )
-
-
-def send_sms(destination: str, message_text: str) -> dict[str, str]:
-    """
-    Send SMS via teliapi.net call and returns the response
-    """
-    print(f"SMS sending {message_text} to {destination}")
-    payload = {
-        "source": sms_number,
-        "destination": destination,
-        "message": message_text,
-    }
-    response = requests.post(
-        "https://api.teleapi.net/sms/send?token=" + token,
-        data=payload,
-    )
-    response_json = response.json()
-    return response_json
 
 
 class Reaction:
@@ -86,14 +68,14 @@ class Message:
         # quote_ts = msg.get("quote", {}).get("id")
         self.reactions: dict[str, str] = {}
         self.command: Optional[str] = None
-        tokens = None
+        self.tokens = None
         if self.sender in wisp.user_callbacks:
-            tokens = self.text.split(" ")
+            self.tokens = self.text.split(" ")
         elif self.text and self.text.startswith("/"):
-            command, *tokens = self.text.split(" ")
+            command, *self.tokens = self.text.split(" ")
             self.command = command[1:]  # remove /
-            self.text = " ".join(tokens)
-        self.arg1 = tokens[0] if tokens else None
+            self.text = " ".join(self.tokens)
+        self.arg1 = self.tokens[0] if self.tokens else None
 
     # it might be text
     # if it's text, it might be a command
@@ -107,6 +89,122 @@ class Message:
             attr: getattr(self, attr)
             for attr in ("text", "sender", "sender_name", "command", "ts")
         }
+
+
+class Account:
+    db = forest_tables.UserManager()
+
+    def __init__(self, wisperer: "WhispererBase"):
+        self.whisperer = wisperer
+
+    async def start(self) -> None:
+        user = (await self.db.get_free_user())[0]
+        self.id, data = user.get("row")
+        self.number = "+1" + self.id.lstrip("+1")
+        loaded_data = json.loads(data)
+        if "username" in loaded_data:
+            open(f"data/{self.number}", "w").write(data)
+        elif "tarball" in loaded_data:
+            TarFile(
+                fileobj=BytesIO(
+                    urlsafe_b64decode(loaded_data["tarball"].encode())
+                )
+            ).extractall()
+        await self.set_pingback(self.id.lstrip("1"))
+
+    async def stop(self) -> None:
+        db = forest_tables.UserManager()
+        buffer = BytesIO()
+        tar = TarFile(fileobj=buffer)
+        tar.add("data")
+        tar.close()
+        buffer.seek(0)
+        data = json.dumps(
+            {"tarball": urlsafe_b64encode(buffer.read()).decode()}
+        )
+        await db.set_user(self.id, data)
+        logging.info("put %s account data in db", self.number)
+        if hasattr(self, "tunnel"):
+            self.tunnel.terminate()
+
+    def send_sms(self, destination: str, message_text: str) -> dict[str, str]:
+        """
+        Send SMS via teliapi.net call and returns the response
+        """
+        print(f"SMS sending {message_text} to {destination}")
+        payload = {
+            "source": self.number.lstrip("+1"),
+            "destination": destination,
+            "message": message_text,
+        }
+        response = requests.post(
+            "https://api.teleapi.net/sms/send?token=" + token,
+            data=payload,
+        )
+        response_json = response.json()
+        return response_json
+
+    async def set_pingback(self, target: str) -> None:
+        async with aiohttp.ClientSession() as session:
+            print(target)
+            async with session.get(
+                f"https://apiv1.teleapi.net/user/dids/get?token={token}&number={target}"
+            ) as resp:
+                did_lookup = await resp.json()
+            print("did_lookup:", did_lookup)
+            did_id = did_lookup.get("data").get("id")
+            # if retcode==127: exec("sudo npm install -g localtunnel")
+            self.tunnel = await asyncio.create_subprocess_exec(
+                *("lt -p 8080".split()),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            assert self.tunnel.stdout
+            url = (await self.tunnel.stdout.readline()).decode().strip(
+                "your url is: "
+            ).strip() + "/inbound"
+            print("our url for receiving sms is", url)
+            async with session.get(
+                f"https://apiv1.teleapi.net/user/dids/smsurl/set?token={token}&did_id={did_id}&url={url}"
+            ) as set_req:
+                print(await set_req.text())
+
+    async def flask_handler(self) -> None:
+        flask = await asyncio.create_subprocess_exec(
+            sys.executable, "listener.py", stdout=PIPE
+        )
+        assert flask.stdout
+        try:
+            while True:
+                line = (await flask.stdout.readline()).decode("utf-8").strip()
+                try:
+                    event = json.loads(line)
+                    print(event)
+                    if "sms" in event:
+                        source = "+1" + event["sms"]["source"]
+                        if source in whisperer.groupid_to_person.inverse:
+                            command = {
+                                "command": "send",
+                                "message": event["sms"]["message"],
+                                "group": whisperer.groupid_to_person.inverse[
+                                    source
+                                ],
+                            }
+                            whisperer.signal_line(command)
+                            print("sent to group")
+                        else:
+                            whisperer.send(
+                                whisperer.admins[0],
+                                f"SMS from {source}: {event['sms']['message']}",
+                            )
+                    elif "action" in event and event["action"] == "send":
+                        whisperer.send(event["recipient"], event["message"])
+                except json.JSONDecodeError:
+                    if line:
+                        print(line)
+        finally:
+            flask.terminate()
+            print("flask terminated")
 
 
 Callback = Callable[[Message], Optional[str]]
@@ -127,11 +225,11 @@ class WhispererBase:
         self.sent_messages: dict[int, dict[str, Message]] = defaultdict(dict)
         self.groupid_to_person: bidict[str, str] = bidict()
         self.pending_captureds: list[str] = []
-
+        self.account = Account(self)
         # it's like this so it can be mocked out in tests
         self.signal_proc: Process
 
-    def __enter__(self) -> "WhispererBase":
+    async def __aenter__(self) -> "WhispererBase":
         try:
             # should add groups to this
             user_names, followers, blocked = json.load(open(self.fname))
@@ -149,9 +247,10 @@ class WhispererBase:
         self.attachments_dir = (
             pathlib.Path.home() / ".local/share/signal-cli/attachments"
         )
+        await self.account.start()
         return self
 
-    def __exit__(self, _: Any, value: Any, traceback: Any) -> None:
+    async def __aexit__(self, _: Any, value: Any, traceback: Any) -> None:
         json.dump(
             [dict(self.user_names), self.followers, list(self.blocked)],
             open(self.fname, "w"),
@@ -159,12 +258,13 @@ class WhispererBase:
         logging.info("dumped user data to %s", self.fname)
         self.signal_proc.terminate()
         logging.info("terminated signal-cli process")
+        await self.account.stop()
 
     def signal_line(self, command: dict) -> None:
         assert self.signal_proc.stdin
         line = json.dumps(command).encode("utf-8") + b"\n"
         self.signal_proc.stdin.write(line)
-        if isinstance(self.signal_proc.stdin, io.BufferedWriter):
+        if isinstance(self.signal_proc.stdin, BufferedWriter):
             self.signal_proc.stdin.flush()
             # so that it works both sync and async
         print(line)
@@ -190,6 +290,7 @@ class WhispererBase:
                 for name in dir(self)
                 if name.startswith("do_")
                 and not hasattr(getattr(self, name), "admin")
+                and hasattr(getattr(self, name), "__doc__")
             )
         return resp
 
@@ -287,7 +388,7 @@ class WhispererBase:
         logging.debug("reaction from %s targeting %s", msg.sender, react.ts)
         self.received_messages[msg.ts][msg.sender] = msg
         # stylistic choice to have less indents
-        if react.author != SERVER_NUMBER or react.ts not in self.sent_messages:
+        if react.author != self.number or react.ts not in self.sent_messages:
             return
 
         target_msg = self.sent_messages[react.ts][msg.sender]
@@ -316,7 +417,7 @@ class WhispererBase:
             # if it's a group
             if msg.group_info and "groupId" in msg.group_info and msg.text:
                 target = self.groupid_to_person[msg.group_info["groupId"]]
-                send_sms(target, msg.text)
+                self.account.send_sms(target, msg.text)
                 # self.send(target, msg.text, force=True)
                 print("sent to target")
                 return
@@ -337,7 +438,7 @@ class WhispererBase:
             if msg.quoted_text and "SMS" in msg.quoted_text:
                 try:
                     replying_to = msg.quoted_text.strip("SMS from").split(":")[0]
-                    send_sms(replying_to, msg.text)
+                    self.account.send_sms(replying_to, msg.text)
                     self.send(msg.sender, f"sent {msg.text} to {replying_to}")
                 except IndexError:
                     pass
@@ -385,19 +486,31 @@ class WhispererBase:
         repeatedly reads json envelopes from signal-cli and massages the fields
         for receive_reaction and receive
         """
+        self.number = self.account.number
+        command = f"./signal-cli --config . -u {self.number} --output=json stdio".split()
         self.signal_proc = await asyncio.create_subprocess_exec(
-            *SIGNAL_CLI, stdin=PIPE, stdout=PIPE, stderr=PIPE
+            *command, stdin=PIPE, stdout=PIPE, stderr=STDOUT
         )
-        logging.info("started signal-cli process")
+        logging.info("started signal-cli process, number: %s", self.number)
+        profile = {
+            "command": "updateProfile",
+            "avatar": "avatar.png",
+            "name": "whispr",
+            "about": "whisperbot9000",
+            "about-emoji": "🤫 ",
+        }
+        self.signal_line(profile)
         assert self.signal_proc.stdout and self.signal_proc.stdin
         while True:
             line = (await self.signal_proc.stdout.readline()).decode("utf-8")
             if not line.startswith("{"):
-                logging.warning("signal-cli says: %s", line.strip())
+                if line.strip():
+                    logging.warning("signal-cli says: %s", line.strip())
                 continue
             try:
                 logging.info(line.strip())
                 json_output = json.loads(line)
+                # if "error" in json_output: signal-cli send --endsession
                 if "group" in json_output:
                     captured = self.pending_captureds.pop()
                     self.groupid_to_person[json_output["group"]] = captured
@@ -420,7 +533,8 @@ def takes_number(command: Callable) -> Callable:
             target_number = self.user_names.inverse[msg.arg1]
             return command(self, msg, target_number)
         try:
-            parsed = pn.parse(msg.arg1, None)
+            # todo: parse (123) 456-6789 if it's multiple tokens
+            parsed = pn.parse(msg.arg1, "US")
             assert pn.is_valid_number(parsed)
             target_number = pn.format_number(parsed, pn.PhoneNumberFormat.E164)
             return command(self, msg, target_number)
@@ -449,6 +563,11 @@ def do_echo(msg: Message) -> str:
     return msg.text
 
 
+def do_printerfact(_: Message) -> str:
+    """learn a printer fact"""
+    return requests.get("https://colbyolson.com/printers").text.strip()
+
+
 class Whisperer(WhispererBase):
     """
     defines the rest of the commands
@@ -467,6 +586,8 @@ class Whisperer(WhispererBase):
             # ideally react to the message indicating it was sent?
 
     do_echo = staticmethod(do_echo)
+
+    do_printerfact = staticmethod(do_printerfact)
 
     @takes_number
     def do_mkgroup(self, msg: Message, target_number: str) -> str:
@@ -609,6 +730,13 @@ class Whisperer(WhispererBase):
             self.register_callback(proxied, "", proxy_callback)
         return "entered proxy mode"
 
+    @takes_number
+    def do_send_sms(self, msg: Message, target_number: str) -> str:
+        if msg.tokens and len(msg.tokens) >= 3:
+            self.account.send_sms(target_number, " ".join(msg.tokens[2:]))
+            return f"(tried to) send a message to {target_number}"
+        return "didn't see a number/message pair"
+
     @admin
     def do_debug(self, msg: Message) -> str:  # pylint: disable=no-self-use
         try:
@@ -631,56 +759,9 @@ whisperer = Whisperer()
 # emoji?
 
 
-async def flask_handler() -> None:
-    # tunnel = await asyncio.create_subprocess_exec(
-    #     "lt", "-p", "8080", stdout=PIPE
-    # )
-    # your_url = (await tunnel.stdout.readline()).decode().strip("your url is:")
-    # print(your_url)
-    # clip = await asyncio.create_subprocess_exec(["xclip", "-sel", "clip", "-in"], stdin=PIPE)
-    # clip.stdin.write(your_url + "\n")
-    # requests.post(
-    # this is a little batshit and isn't the right endpoint anyway...
-    #    f"​https://apiv1.teleapi.net/user/api/smsurl?token={token}&url={your_url}"
-    # )
-    flask = await asyncio.create_subprocess_exec(
-        sys.executable, "listener.py", stdout=PIPE
-    )
-    assert flask.stdout
-    try:
-        while True:
-            line = (await flask.stdout.readline()).decode("utf-8").strip()
-            try:
-                event = json.loads(line)
-                print(event)
-                if "sms" in event:
-                    source = "+1" + event["sms"]["source"]
-                    if source in whisperer.groupid_to_person.inverse:
-                        command = {
-                            "command": "send",
-                            "message": event["sms"]["message"],
-                            "group": whisperer.groupid_to_person.inverse[source],
-                        }
-                        whisperer.signal_line(command)
-                        print("sent to group")
-                    else:
-                        whisperer.send(
-                            whisperer.admins[0],
-                            f"SMS from {source}: {event['sms']['message']}",
-                        )
-                elif "action" in event and event["action"] == "send":
-                    whisperer.send(event["recipient"], event["message"])
-            except json.JSONDecodeError:
-                if line:
-                    print(line)
-    finally:
-        flask.terminate()
-        print("flask terminated")
-
-
 async def main() -> None:
-    with whisperer:
-        await asyncio.gather(whisperer.run(), flask_handler())
+    async with whisperer:
+        await asyncio.gather(whisperer.run(), whisperer.account.flask_handler())
 
 
 if __name__ == "__main__":

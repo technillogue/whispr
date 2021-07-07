@@ -14,6 +14,7 @@ class OutgoingMessage(UserString):  # pylint: disable=too-many-ancestors
     def __init__(  # pylint: disable=super-init-not-called
         self, signal_command: dict
     ) -> None:
+        # this is outdated by the forest fork of signal-cli
         self.attachments = signal_command.get("details", {}).get("attachments")
         self.recipient = signal_command["recipient"]
         self.data = signal_command["content"]

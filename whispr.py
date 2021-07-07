@@ -22,17 +22,21 @@ from bidict import bidict
 import phonenumbers as pn
 import aiohttp
 import requests
+
+
+sys.path.append("../forest-draft")
+
+import utils
 import forest_tables
+import datastore
 
 # pylint: disable=too-many-instance-attributes,fixme
-
-teli = json.load(open("teli"))
-_, token = teli["number"], teli["key"]
 
 logging.basicConfig(
     level=logging.DEBUG, format="{levelname}: {message}", style="{"
 )
 
+token = os.environ["TELI_KEY"]
 
 class Reaction:
     def __init__(self, reaction: dict) -> None:
@@ -115,7 +119,7 @@ class Account:
     async def stop(self) -> None:
         db = forest_tables.UserManager()
         buffer = BytesIO()
-        tar = TarFile(fileobj=buffer)
+        tar = TarFile(fileobj=buffer, mode="w")
         tar.add("data")
         tar.close()
         buffer.seek(0)
@@ -146,24 +150,27 @@ class Account:
 
     async def set_pingback(self, target: str) -> None:
         async with aiohttp.ClientSession() as session:
-            print(target)
+            self.tunnel = await asyncio.create_subprocess_exec(
+                *("npx --ignore-existing localtunnel --port 8080".split()),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            assert self.tunnel.stdout
+            line = await self.tunnel.stdout.readline()
+            print(line)
+            url = line.decode().strip(
+                "your url is: "
+            ).strip() + "/inbound"
+            if self.tunnel.returncode:
+                print(f"localtunnel didn't work, go set the callback for {target} manually")
+                return
+            print("our url for receiving sms is", url)
             async with session.get(
                 f"https://apiv1.teleapi.net/user/dids/get?token={token}&number={target}"
             ) as resp:
                 did_lookup = await resp.json()
             print("did_lookup:", did_lookup)
             did_id = did_lookup.get("data").get("id")
-            # if retcode==127: exec("sudo npm install -g localtunnel")
-            self.tunnel = await asyncio.create_subprocess_exec(
-                *("lt -p 8080".split()),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            assert self.tunnel.stdout
-            url = (await self.tunnel.stdout.readline()).decode().strip(
-                "your url is: "
-            ).strip() + "/inbound"
-            print("our url for receiving sms is", url)
             async with session.get(
                 f"https://apiv1.teleapi.net/user/dids/smsurl/set?token={token}&did_id={did_id}&url={url}"
             ) as set_req:
@@ -194,7 +201,7 @@ class Account:
                             print("sent to group")
                         else:
                             whisperer.send(
-                                whisperer.admins[0],
+                                whisperer.last_contacted,
                                 f"SMS from {source}: {event['sms']['message']}",
                             )
                     elif "action" in event and event["action"] == "send":
@@ -369,7 +376,7 @@ class WhispererBase:
                     message=message,
                 )
                 if attachments:
-                    command["attachments"] = [attachments]
+                    command["attachment"] = [attachments]
                 self.signal_line(command)
 
     fib = [0, 1]
@@ -421,6 +428,8 @@ class WhispererBase:
                 # self.send(target, msg.text, force=True)
                 print("sent to target")
                 return
+            if msg.sender:
+                self.last_contacted = msg.sender
             if (
                 msg.sender
                 and msg.sender in self.groupid_to_person.inverse
@@ -495,8 +504,8 @@ class WhispererBase:
         profile = {
             "command": "updateProfile",
             "avatar": "avatar.png",
-            "name": "whispr",
-            "about": "whisperbot9000",
+            "name": "Xisperbot",
+            "about": f"Xisper",
             "about-emoji": "🤫 ",
         }
         self.signal_line(profile)
@@ -573,6 +582,9 @@ class Whisperer(WhispererBase):
     defines the rest of the commands
     """
 
+
+    #self.user_info = ...
+
     def do_default(self, msg: Message) -> None:
         """send a message to your followers"""
         if msg.sender not in self.user_names:
@@ -608,6 +620,17 @@ class Whisperer(WhispererBase):
     @takes_number
     def do_follow(self, msg: Message, target_number: str) -> str:
         """/follow [number or name]. follow someone"""
+        # if self.user_info[target_number].protected:
+        #     self.payments_manager = PaymentsManager()
+        #     async def check_payment():
+        #         payment_done = await self.payments_manager.get_payment(10)
+        #         if payment_done:
+        #             self.send(target_number, f"{msg.sender_name} has followed you")
+        #             self.followers[target_number].append(msg.sender)
+        #         else:
+        #             addr = await self.payments_manager.get_address_for(target_number)
+        #             self.send(msg.sender, f"pay 15 mob to {addr} for that")
+        #     asyncio.create_task(check_payment())
         if msg.sender not in self.followers[target_number]:
             self.send(target_number, f"{msg.sender_name} has followed you")
             self.followers[target_number].append(msg.sender)

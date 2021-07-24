@@ -36,7 +36,8 @@ logging.basicConfig(
     level=logging.DEBUG, format="{levelname}: {message}", style="{"
 )
 
-token = os.environ["TELI_KEY"]
+token = utils.get_secret("TELI_KEY")
+
 
 class Reaction:
     def __init__(self, reaction: dict) -> None:
@@ -64,7 +65,11 @@ class Message:
         except (AssertionError, KeyError):
             self.reaction = None
         self.attachments = [
-            str(wisp.attachments_dir / attachment["id"])
+            str(
+                (wisp.attachments_dir / attachment["id"])
+                .rename(wisp.attachments_dir / attachment["filename"])
+                .absolute()
+            )
             for attachment in msg.get("attachments", [])
         ]
         self.group_info = msg.get("groupInfo")
@@ -96,38 +101,21 @@ class Message:
 
 
 class Account:
-    db = forest_tables.UserManager()
+    import datastore
+
+    db = datastore.get_account_interface()
 
     def __init__(self, wisperer: "WhispererBase"):
         self.whisperer = wisperer
 
     async def start(self) -> None:
-        user = (await self.db.get_free_user())[0]
-        self.id, data = user.get("row")
-        self.number = "+1" + self.id.lstrip("+1")
-        loaded_data = json.loads(data)
-        if "username" in loaded_data:
-            open(f"data/{self.number}", "w").write(data)
-        elif "tarball" in loaded_data:
-            TarFile(
-                fileobj=BytesIO(
-                    urlsafe_b64decode(loaded_data["tarball"].encode())
-                )
-            ).extractall()
-        await self.set_pingback(self.id.lstrip("1"))
+        self.datastore = await datastore.getFreeSignalDatastore()
+        await self.datastore.download()
+        await self.set_pingback(utils.signal_format(self.datastore.number))
 
     async def stop(self) -> None:
-        db = forest_tables.UserManager()
-        buffer = BytesIO()
-        tar = TarFile(fileobj=buffer, mode="w")
-        tar.add("data")
-        tar.close()
-        buffer.seek(0)
-        data = json.dumps(
-            {"tarball": urlsafe_b64encode(buffer.read()).decode()}
-        )
-        await db.set_user(self.id, data)
-        logging.info("put %s account data in db", self.number)
+        await self.datastore.upload()
+        await self.datastore.mark_freed()
         if hasattr(self, "tunnel"):
             self.tunnel.terminate()
 
@@ -137,7 +125,7 @@ class Account:
         """
         print(f"SMS sending {message_text} to {destination}")
         payload = {
-            "source": self.number.lstrip("+1"),
+            "source": (utils.teli_format(self.datastore.number)),
             "destination": destination,
             "message": message_text,
         }
@@ -158,11 +146,11 @@ class Account:
             assert self.tunnel.stdout
             line = await self.tunnel.stdout.readline()
             print(line)
-            url = line.decode().strip(
-                "your url is: "
-            ).strip() + "/inbound"
+            url = line.decode().strip("your url is: ").strip() + "/inbound"
             if self.tunnel.returncode:
-                print(f"localtunnel didn't work, go set the callback for {target} manually")
+                print(
+                    f"localtunnel didn't work, go set the callback for {target} manually"
+                )
                 return
             print("our url for receiving sms is", url)
             async with session.get(
@@ -224,7 +212,8 @@ class WhispererBase:
     blocking and unblocking; new users; and the /name and /help commands
     """
 
-    def __init__(self, fname: str = "users.json") -> None:
+    def __init__(self, fname: str = "users.json", remote=False) -> None:
+        self.remote = remote
         self.fname = fname
         self.user_callbacks: dict[str, Callback] = {}
         # ...messages[timestamp][user] = msg
@@ -232,7 +221,6 @@ class WhispererBase:
         self.sent_messages: dict[int, dict[str, Message]] = defaultdict(dict)
         self.groupid_to_person: bidict[str, str] = bidict()
         self.pending_captureds: list[str] = []
-        self.account = Account(self)
         # it's like this so it can be mocked out in tests
         self.signal_proc: Process
 
@@ -251,10 +239,19 @@ class WhispererBase:
         self.user_names = bidict(user_names)
         self.followers = defaultdict(list, followers)
         self.blocked: set[str] = set(blocked)
+        if self.remote:
+            try:
+                self.store = datastore.SignalDatastore(
+                    open("server_number").read().strip()
+                )
+                await self.store.download()
+            except:
+                self.store = await datastore.getFreeSignalDatastore()
+                await self.store.download()
         self.attachments_dir = (
-            pathlib.Path.home() / ".local/share/signal-cli/attachments"
+            pathlib.Path("./attachments")
+            #            pathlib.Path.home() / ".local/share/signal-cli/attachments"
         )
-        await self.account.start()
         return self
 
     async def __aexit__(self, _: Any, value: Any, traceback: Any) -> None:
@@ -265,7 +262,9 @@ class WhispererBase:
         logging.info("dumped user data to %s", self.fname)
         self.signal_proc.terminate()
         logging.info("terminated signal-cli process")
-        await self.account.stop()
+        if self.remote:
+            await self.datastore.upload()
+            await self.datastore.mark_account_freed()
 
     def signal_line(self, command: dict) -> None:
         assert self.signal_proc.stdin
@@ -376,7 +375,7 @@ class WhispererBase:
                     message=message,
                 )
                 if attachments:
-                    command["attachment"] = [attachments]
+                    command["attachment"] = attachments
                 self.signal_line(command)
 
     fib = [0, 1]
@@ -495,7 +494,7 @@ class WhispererBase:
         repeatedly reads json envelopes from signal-cli and massages the fields
         for receive_reaction and receive
         """
-        self.number = self.account.number
+        self.number = utils.signal_format(open("server_number").read().strip())
         command = f"./signal-cli --config . -u {self.number} --output=json stdio".split()
         self.signal_proc = await asyncio.create_subprocess_exec(
             *command, stdin=PIPE, stdout=PIPE, stderr=STDOUT
@@ -504,8 +503,8 @@ class WhispererBase:
         profile = {
             "command": "updateProfile",
             "avatar": "avatar.png",
-            "name": "Xisperbot",
-            "about": f"Xisper",
+            "name": "murmerbot",
+            "about": "murmer",
             "about-emoji": "🤫 ",
         }
         self.signal_line(profile)
@@ -582,8 +581,7 @@ class Whisperer(WhispererBase):
     defines the rest of the commands
     """
 
-
-    #self.user_info = ...
+    # self.user_info = ...
 
     def do_default(self, msg: Message) -> None:
         """send a message to your followers"""
@@ -601,6 +599,7 @@ class Whisperer(WhispererBase):
 
     do_printerfact = staticmethod(do_printerfact)
 
+    @admin
     @takes_number
     def do_mkgroup(self, msg: Message, target_number: str) -> str:
         """make a group to capture proxied DMs"""
@@ -753,6 +752,7 @@ class Whisperer(WhispererBase):
             self.register_callback(proxied, "", proxy_callback)
         return "entered proxy mode"
 
+    @admin
     @takes_number
     def do_send_sms(self, msg: Message, target_number: str) -> str:
         if msg.tokens and len(msg.tokens) >= 3:
@@ -784,7 +784,10 @@ whisperer = Whisperer()
 
 async def main() -> None:
     async with whisperer:
-        await asyncio.gather(whisperer.run(), whisperer.account.flask_handler())
+        await whisperer.run()
+
+
+#        await asyncio.gather(whisperer.run())
 
 
 if __name__ == "__main__":

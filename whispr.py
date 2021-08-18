@@ -36,7 +36,8 @@ logging.basicConfig(
     level=logging.DEBUG, format="{levelname}: {message}", style="{"
 )
 
-token = os.environ["TELI_KEY"]
+token = utils.get_secret("TEL_KEY")
+
 
 class Reaction:
     def __init__(self, reaction: dict) -> None:
@@ -95,125 +96,6 @@ class Message:
         }
 
 
-class Account:
-    db = forest_tables.UserManager()
-
-    def __init__(self, wisperer: "WhispererBase"):
-        self.whisperer = wisperer
-
-    async def start(self) -> None:
-        user = (await self.db.get_free_user())[0]
-        self.id, data = user.get("row")
-        self.number = "+1" + self.id.lstrip("+1")
-        loaded_data = json.loads(data)
-        if "username" in loaded_data:
-            open(f"data/{self.number}", "w").write(data)
-        elif "tarball" in loaded_data:
-            TarFile(
-                fileobj=BytesIO(
-                    urlsafe_b64decode(loaded_data["tarball"].encode())
-                )
-            ).extractall()
-        await self.set_pingback(self.id.lstrip("1"))
-
-    async def stop(self) -> None:
-        db = forest_tables.UserManager()
-        buffer = BytesIO()
-        tar = TarFile(fileobj=buffer, mode="w")
-        tar.add("data")
-        tar.close()
-        buffer.seek(0)
-        data = json.dumps(
-            {"tarball": urlsafe_b64encode(buffer.read()).decode()}
-        )
-        await db.set_user(self.id, data)
-        logging.info("put %s account data in db", self.number)
-        if hasattr(self, "tunnel"):
-            self.tunnel.terminate()
-
-    def send_sms(self, destination: str, message_text: str) -> dict[str, str]:
-        """
-        Send SMS via teliapi.net call and returns the response
-        """
-        print(f"SMS sending {message_text} to {destination}")
-        payload = {
-            "source": self.number.lstrip("+1"),
-            "destination": destination,
-            "message": message_text,
-        }
-        response = requests.post(
-            "https://api.teleapi.net/sms/send?token=" + token,
-            data=payload,
-        )
-        response_json = response.json()
-        return response_json
-
-    async def set_pingback(self, target: str) -> None:
-        async with aiohttp.ClientSession() as session:
-            self.tunnel = await asyncio.create_subprocess_exec(
-                *("npx --ignore-existing localtunnel --port 8080".split()),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            assert self.tunnel.stdout
-            line = await self.tunnel.stdout.readline()
-            print(line)
-            url = line.decode().strip(
-                "your url is: "
-            ).strip() + "/inbound"
-            if self.tunnel.returncode:
-                print(f"localtunnel didn't work, go set the callback for {target} manually")
-                return
-            print("our url for receiving sms is", url)
-            async with session.get(
-                f"https://apiv1.teleapi.net/user/dids/get?token={token}&number={target}"
-            ) as resp:
-                did_lookup = await resp.json()
-            print("did_lookup:", did_lookup)
-            did_id = did_lookup.get("data").get("id")
-            async with session.get(
-                f"https://apiv1.teleapi.net/user/dids/smsurl/set?token={token}&did_id={did_id}&url={url}"
-            ) as set_req:
-                print(await set_req.text())
-
-    async def flask_handler(self) -> None:
-        flask = await asyncio.create_subprocess_exec(
-            sys.executable, "listener.py", stdout=PIPE
-        )
-        assert flask.stdout
-        try:
-            while True:
-                line = (await flask.stdout.readline()).decode("utf-8").strip()
-                try:
-                    event = json.loads(line)
-                    print(event)
-                    if "sms" in event:
-                        source = "+1" + event["sms"]["source"]
-                        if source in whisperer.groupid_to_person.inverse:
-                            command = {
-                                "command": "send",
-                                "message": event["sms"]["message"],
-                                "group": whisperer.groupid_to_person.inverse[
-                                    source
-                                ],
-                            }
-                            whisperer.signal_line(command)
-                            print("sent to group")
-                        else:
-                            whisperer.send(
-                                whisperer.last_contacted,
-                                f"SMS from {source}: {event['sms']['message']}",
-                            )
-                    elif "action" in event and event["action"] == "send":
-                        whisperer.send(event["recipient"], event["message"])
-                except json.JSONDecodeError:
-                    if line:
-                        print(line)
-        finally:
-            flask.terminate()
-            print("flask terminated")
-
-
 Callback = Callable[[Message], Optional[str]]
 
 
@@ -251,9 +133,8 @@ class WhispererBase:
         self.user_names = bidict(user_names)
         self.followers = defaultdict(list, followers)
         self.blocked: set[str] = set(blocked)
-        self.attachments_dir = (
-            pathlib.Path.home() / ".local/share/signal-cli/attachments"
-        )
+        self.attachments_dir = pathlib.Path(".") / "/attachments"
+           # ".local/share/signal-cli"
         await self.account.start()
         return self
 
@@ -582,8 +463,7 @@ class Whisperer(WhispererBase):
     defines the rest of the commands
     """
 
-
-    #self.user_info = ...
+    # self.user_info = ...
 
     def do_default(self, msg: Message) -> None:
         """send a message to your followers"""

@@ -72,8 +72,10 @@ class Message:
             )
             for attachment in msg.get("attachments", [])
         ]
+
         self.group_info = msg.get("groupInfo")
         self.quoted_text = msg.get("quote", {}).get("text")
+        self.payment = msg.get("payment")
         # quote_ts = msg.get("quote", {}).get("id")
         self.reactions: dict[str, str] = {}
         self.command: Optional[str] = None
@@ -213,6 +215,7 @@ class WhispererBase:
     """
 
     def __init__(self, fname: str = "users.json", remote=False) -> None:
+        self.paid: dict[str, bool] = {}
         self.remote = remote
         self.fname = fname
         self.user_callbacks: dict[str, Callback] = {}
@@ -429,6 +432,10 @@ class WhispererBase:
                 return
             if msg.sender:
                 self.last_contacted = msg.sender
+            if msg.payment:
+                self.paid[msg.sender] = True
+                self.send(msg.sender, "received your payment")
+                return
             if (
                 msg.sender
                 and msg.sender in self.groupid_to_person.inverse
@@ -619,6 +626,9 @@ class Whisperer(WhispererBase):
     @takes_number
     def do_follow(self, msg: Message, target_number: str) -> str:
         """/follow [number or name]. follow someone"""
+        if not self.paid.get(msg.sender):
+            return "this user is protected. send 0.5 mob to follow"
+        
         # if self.user_info[target_number].protected:
         #     self.payments_manager = PaymentsManager()
         #     async def check_payment():
@@ -633,6 +643,7 @@ class Whisperer(WhispererBase):
         if msg.sender not in self.followers[target_number]:
             self.send(target_number, f"{msg.sender_name} has followed you")
             self.followers[target_number].append(msg.sender)
+            self.paid[msg.sender] = False
             # offer to follow back?
             return f"followed {msg.arg1}"
         return f"you're already following {msg.arg1}"

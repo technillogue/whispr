@@ -1,4 +1,5 @@
 #!/usr/bin/python3.9
+from contextlib import asynccontextmanager 
 from typing import (
     Optional,
     Any,
@@ -21,20 +22,18 @@ import time
 from bidict import bidict
 import phonenumbers as pn
 import aiohttp
-import requests
+
+# import requests
 
 
 sys.path.append("../forest-draft")
 
 import utils
-import forest_tables
 import datastore
 
 # pylint: disable=too-many-instance-attributes,fixme
 
-logging.basicConfig(
-    level=logging.DEBUG, format="{levelname}: {message}", style="{"
-)
+logging.basicConfig(level=logging.DEBUG, format="{levelname}: {message}", style="{")
 
 token = utils.get_secret("TELI_KEY")
 
@@ -102,109 +101,38 @@ class Message:
         }
 
 
-class Account:
-    import datastore
-
-    db = datastore.get_account_interface()
-
-    def __init__(self, wisperer: "WhispererBase"):
-        self.whisperer = wisperer
-
-    async def start(self) -> None:
-        self.datastore = await datastore.getFreeSignalDatastore()
-        await self.datastore.download()
-        await self.set_pingback(utils.signal_format(self.datastore.number))
-
-    async def stop(self) -> None:
-        await self.datastore.upload()
-        await self.datastore.mark_freed()
-        if hasattr(self, "tunnel"):
-            self.tunnel.terminate()
-
-    def send_sms(self, destination: str, message_text: str) -> dict[str, str]:
-        """
-        Send SMS via teliapi.net call and returns the response
-        """
-        print(f"SMS sending {message_text} to {destination}")
-        payload = {
-            "source": (utils.teli_format(self.datastore.number)),
-            "destination": destination,
-            "message": message_text,
-        }
-        response = requests.post(
-            "https://api.teleapi.net/sms/send?token=" + token,
-            data=payload,
-        )
-        response_json = response.json()
-        return response_json
-
-    async def set_pingback(self, target: str) -> None:
-        async with aiohttp.ClientSession() as session:
-            self.tunnel = await asyncio.create_subprocess_exec(
-                *("npx --ignore-existing localtunnel --port 8080".split()),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            assert self.tunnel.stdout
-            line = await self.tunnel.stdout.readline()
-            print(line)
-            url = line.decode().strip("your url is: ").strip() + "/inbound"
-            if self.tunnel.returncode:
-                print(
-                    f"localtunnel didn't work, go set the callback for {target} manually"
-                )
-                return
-            print("our url for receiving sms is", url)
-            async with session.get(
-                f"https://apiv1.teleapi.net/user/dids/get?token={token}&number={target}"
-            ) as resp:
-                did_lookup = await resp.json()
-            print("did_lookup:", did_lookup)
-            did_id = did_lookup.get("data").get("id")
-            async with session.get(
-                f"https://apiv1.teleapi.net/user/dids/smsurl/set?token={token}&did_id={did_id}&url={url}"
-            ) as set_req:
-                print(await set_req.text())
-
-    async def flask_handler(self) -> None:
-        flask = await asyncio.create_subprocess_exec(
-            sys.executable, "listener.py", stdout=PIPE
-        )
-        assert flask.stdout
-        try:
-            while True:
-                line = (await flask.stdout.readline()).decode("utf-8").strip()
-                try:
-                    event = json.loads(line)
-                    print(event)
-                    if "sms" in event:
-                        source = "+1" + event["sms"]["source"]
-                        if source in whisperer.groupid_to_person.inverse:
-                            command = {
-                                "command": "send",
-                                "message": event["sms"]["message"],
-                                "group": whisperer.groupid_to_person.inverse[
-                                    source
-                                ],
-                            }
-                            whisperer.signal_line(command)
-                            print("sent to group")
-                        else:
-                            whisperer.send(
-                                whisperer.last_contacted,
-                                f"SMS from {source}: {event['sms']['message']}",
-                            )
-                    elif "action" in event and event["action"] == "send":
-                        whisperer.send(event["recipient"], event["message"])
-                except json.JSONDecodeError:
-                    if line:
-                        print(line)
-        finally:
-            flask.terminate()
-            print("flask terminated")
-
-
 Callback = Callable[[Message], Optional[str]]
+
+
+
+class SimpleInterface:
+    def __init__(self, database: str) -> None:
+        self.database = database
+        self.pool: Optional[asyncpg.Pool] = None
+
+    @asynccontextmanager
+    async def get_connection(self) -> AsyncGenerator:
+        if not self.pool:
+            self.pool = await asyncpg.create_pool(self.database)
+            pghelp.pools.append(self.pool)
+        async with self.pool.acquire() as conn:
+            yield conn
+
+class WhisprDB(SimpleInterface):
+    def __init__(self, database: str) -> None:
+        self.database = database
+    async def connect_pg(self) -> None:
+        self.pool = await asyncpg.create_pool(self.database)
+        pools.append(self.pool)
+
+    create = """CREATE TABLE IF NOT EXISTS whispr_user (number TEXT UNIQUE, name TEXT, blocked BOOLEAN);
+        CREATE TABLE IF NOT EXISTS whispr_follower (followed TEXT, following TEXT);"""
+
+    async def get_name(self, number: str) -> str:
+        with self.pool.acquire() as conn:
+            return conn.fetchval("SELECT name FROM whispr_user WHERE number=$1", number)
+
+    async def set_name
 
 
 class WhispererBase:
@@ -242,15 +170,14 @@ class WhispererBase:
         self.user_names = bidict(user_names)
         self.followers = defaultdict(list, followers)
         self.blocked: set[str] = set(blocked)
-        if self.remote:
-            try:
-                self.store = datastore.SignalDatastore(
-                    open("server_number").read().strip()
-                )
-                await self.store.download()
-            except:
-                self.store = await datastore.getFreeSignalDatastore()
-                await self.store.download()
+        try:
+            num = open("server_number").read().strip()
+            logging.info(num)
+            self.store = datastore.SignalDatastore(num)
+            await self.store.download()
+        except:
+            self.store = await datastore.getFreeSignalDatastore()
+            await self.store.download()
         self.attachments_dir = (
             pathlib.Path("./attachments")
             #            pathlib.Path.home() / ".local/share/signal-cli/attachments"
@@ -309,15 +236,11 @@ class WhispererBase:
         if not isinstance(name, str):
             return "missing name argument. usage: /name [name]"
         if name in self.user_names.inverse or name.endswith("proxied"):
-            return (
-                f"'{name}' is already taken, use /name to set a different name"
-            )
+            return f"'{name}' is already taken, use /name to set a different name"
         self.user_names[msg.sender] = name
         return f"other users will now see you as {name}"
 
-    def register_callback(
-        self, user: str, prompt: str, callback: Callable
-    ) -> None:
+    def register_callback(self, user: str, prompt: str, callback: Callable) -> None:
         """
         sends prompt to user. the user's response will be dispatched to
         the given callback instead of the usual flow.
@@ -405,6 +328,15 @@ class WhispererBase:
         target_msg.reactions[msg.sender_name] = react.emoji
         logging.debug("reactions: %s", repr(target_msg.reactions))
         count = len(target_msg.reactions)
+        # of notifications that have received, what is the average number of reactions?
+        reaction_counts = [
+            len(message.reactions)
+            for timestamp, senders in self.sent_messages.items()
+            for sender, message in senders.items()
+            if message.reactions
+        ]
+        sum(reaction_counts) / len(reaction_counts)
+        # if count > 
         if count not in self.fib:
             return
 
@@ -413,9 +345,7 @@ class WhispererBase:
         notif = ", ".join(
             f"{name}: {react}" for name, react in target_msg.reactions.items()
         )
-        self.send(
-            target_msg.sender, f"reactions to '{target_msg.text}': {notif}"
-        )
+        self.send(target_msg.sender, f"reactions to '{target_msg.text}': {notif}")
 
     def receive(self, msg: Message) -> None:
         """
@@ -436,11 +366,7 @@ class WhispererBase:
                 self.paid[msg.sender] = True
                 self.send(msg.sender, "received your payment")
                 return
-            if (
-                msg.sender
-                and msg.sender in self.groupid_to_person.inverse
-                and msg.text
-            ):
+            if msg.sender and msg.sender in self.groupid_to_person.inverse and msg.text:
                 command = {
                     "command": "send",
                     "message": msg.text,
@@ -461,8 +387,7 @@ class WhispererBase:
             if msg.text and msg.text.lower() in ("stop", "block"):
                 self.send(
                     msg.sender,
-                    "i'll stop messaging you. "
-                    "text START or UNBLOCK to resume texts",
+                    "i'll stop messaging you. " "text START or UNBLOCK to resume texts",
                 )
                 self.blocked.add(msg.sender)
                 return
@@ -473,9 +398,7 @@ class WhispererBase:
                     return
                 self.send(msg.sender, "you weren't blocked")
                 return
-            logging.info(
-                "%s: %s says %s", msg.ts, msg.sender_name, msg.full_text
-            )
+            logging.info("%s: %s says %s", msg.ts, msg.sender_name, msg.full_text)
             if msg.sender in self.user_callbacks:
                 resp: Optional[str] = self.user_callbacks.pop(msg.sender)(msg)
             elif msg.command:
@@ -502,7 +425,9 @@ class WhispererBase:
         for receive_reaction and receive
         """
         self.number = utils.signal_format(open("server_number").read().strip())
-        command = f"./signal-cli --config . -u {self.number} --output=json stdio".split()
+        command = (
+            f"./signal-cli --config . -u {self.number} --output=json stdio".split()
+        )
         self.signal_proc = await asyncio.create_subprocess_exec(
             *command, stdin=PIPE, stdout=PIPE, stderr=STDOUT
         )
@@ -578,9 +503,9 @@ def do_echo(msg: Message) -> str:
     return msg.text
 
 
-def do_printerfact(_: Message) -> str:
-    """learn a printer fact"""
-    return requests.get("https://colbyolson.com/printers").text.strip()
+# def do_printerfact(_: Message) -> str:
+#     """learn a printer fact"""
+#     return requests.get("https://colbyolson.com/printers").text.strip()
 
 
 class Whisperer(WhispererBase):
@@ -604,7 +529,7 @@ class Whisperer(WhispererBase):
 
     do_echo = staticmethod(do_echo)
 
-    do_printerfact = staticmethod(do_printerfact)
+    #    do_printerfact = staticmethod(do_printerfact)
 
     @admin
     @takes_number
@@ -628,7 +553,7 @@ class Whisperer(WhispererBase):
         """/follow [number or name]. follow someone"""
         if not self.paid.get(msg.sender):
             return "this user is protected. send 0.5 mob to follow"
-        
+
         # if self.user_info[target_number].protected:
         #     self.payments_manager = PaymentsManager()
         #     async def check_payment():
@@ -788,7 +713,7 @@ class Whisperer(WhispererBase):
         return f"{msg.arg1} is now following you"
 
 
-whisperer = Whisperer()
+whisperer = Whisperer(remote=True)
 # dissappearing messages
 # emoji?
 

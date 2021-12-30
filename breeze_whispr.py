@@ -70,14 +70,16 @@ class Whisperer(PayBot):
 
     async def start_process(self) -> None:
         async with self.db.get_connection() as conn:
-            #            self.user_names: dict = cast(bidict, {})
+            # self.user_names: dict = cast(bidict, {})
             if utils.get_secret("MIGRATE"):
                 await conn.execute(
                     "CREATE TABLE IF NOT EXISTS persist (key TEXT UNIQUE, content JSON);"
                 )
+            logging.info("set codec")
             await conn.set_type_codec(
                 "json", encoder=json.dumps, decoder=json.loads, schema="pg_catalog"
             )
+            logging.info("select names...")
             maybe_names = await conn.fetchval(
                 "SELECT content FROM persist WHERE key='user_names';"
             )
@@ -94,19 +96,24 @@ class Whisperer(PayBot):
         await super().start_process()
 
     async def async_shutdown(self, *_: Any, wait: bool = False) -> None:
-        async with self.db.get_connection() as conn:
+        conn = self.db.get_connection()
+        try:
             vals = {
-                "user_names": self.user_names,
+                "user_names": dict(self.user_names),
                 "followers": dict(self.followers),
                 "blocked": list(self.blocked),
             }
             for key, content in vals.items():
-                logging.info("inserting %s", key)
+                logging.info("inserting %s, %s", key, content)
+                # this blocks?
                 await conn.execute(
-                    "INSERT INTO persist VALUES ($1, $2) ON CONFLICT (key)  DO UPDATE SET key=$1, content=$2;",
+                    "INSERT INTO persist (key, content) VALUES ($1, $2)",# ON CONFLICT (key) DO UPDATE SET key=$1, content=$2;
                     key,
                     content,
                 )
+                logging.info("inserted %s", key)
+        finally:
+            conn.close()
         await super().async_shutdown(wait=wait)
 
     async def sender_name(self, msg: Message) -> str:

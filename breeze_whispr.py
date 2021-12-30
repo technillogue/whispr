@@ -11,17 +11,9 @@ import phonenumbers as pn
 from bidict import bidict
 
 from forest import pghelp, utils
-from forest.core import Message, PayBot, Response, run_bot
+from forest.core import Message, PayBot, Response, run_bot, requires_admin
 
 Callback = Callable[[Message], Awaitable[Optional[str]]]
-
-
-class Reaction:
-    def __init__(self, reaction: dict) -> None:
-        assert reaction
-        self.emoji = reaction["emoji"]
-        self.author = reaction["targetAuthor"]
-        self.ts = round(reaction["targetTimestamp"] / 1000)
 
 
 def takes_number(command: Callable) -> Callable:
@@ -166,17 +158,15 @@ class Whisperer(PayBot):
     async def send_message(
         self,
         recipient: str,
-        message: str,
-        attachments: Optional[list[str]] = None,
+        msg: str,
         force: bool = False,
-        *args: Any,
         **kwargs: Any,
     ) -> None:
         """
         sends a message to recipient. if force is false, checks that the user
         hasn't blocked messages from whispr, and prompts new users for a name
         """
-        if force or recipient not in self.blocked and message:  # replace
+        if force or recipient not in self.blocked and msg:  # replace
             if not force and recipient not in self.user_names:
                 self.user_names[recipient] = recipient
                 await super().send_message(
@@ -185,46 +175,43 @@ class Whisperer(PayBot):
                     "text STOP or BLOCK to not receive messages. type /help "
                     "to view available commands.",
                 )
-                await super().send_message(recipient, message, attachments=attachments)
+                await super().send_message(recipient, msg, **kwargs)
                 await self.register_callback(
                     recipient, "what would you like to be called?", self.do_name
                 )
             else:
-                await super().send_message(recipient, message, attachments=attachments)
+                await super().send_message(recipient, msg, **kwargs)
 
     fib = [0, 1]
     for i in range(20):
         fib.append(fib[-2] + fib[-1])
 
-    async def receive_reaction(self, msg: Message) -> None:
-        """
-        route a reaction to the original message. if the number of reactions
-        that message has is a fibonacci number, notify the message's author
-        this is probably flakey, because signal only gives us timestamps and
-        not message IDs
-        """
-        assert isinstance(msg.reaction, Reaction)
-        react = msg.reaction
-        logging.debug("reaction from %s targeting %s", msg.source, react.ts)
-        self.received_messages[msg.ts][msg.source] = msg
-        # stylistic choice to have less indents
-        if react.author != self.bot_number or react.ts not in self.sent_messages:
-            return
-
-        target_msg = self.sent_messages[react.ts][msg.source]
-        logging.debug("found target message %s", target_msg.text)
-        target_msg.reactions[await self.sender_name(msg)] = react.emoji
-        logging.debug("reactions: %s", repr(target_msg.reactions))
-        count = len(target_msg.reactions)
-        if count not in self.fib:
-            return
-
-        logging.debug("sending reaction notif")
-        # maybe only show reactions that haven't been shown before?
-        notif = ", ".join(
-            f"{name}: {react}" for name, react in target_msg.reactions.items()
-        )
-        self.send_message(target_msg.source, f"reactions to '{target_msg.text}': {notif}")
+    # async def receive_reaction(self, msg: Message) -> None:
+    #     """
+    #     route a reaction to the original message. if the number of reactions
+    #     that message has is a fibonacci number, notify the message's author
+    #     """
+    #     assert isinstance(msg.reaction, Reaction)
+    #     react = msg.reaction
+    #     logging.debug("reaction from %s targeting %s", msg.source, react.ts)
+    #     self.received_messages[msg.ts][msg.source] = msg
+    #     if react.author != self.bot_number or react.ts not in self.sent_messages:
+    #         return
+    #     if not msg.reaction.ts in self.sent_messages:
+    #         logging.info("oh no")
+    #         return None
+    #     message_blob = self.sent_messages[msg.reaction.ts]
+    #     current_reaction_count = len(message_blob["reactions"])
+    #     logging.debug("reactions: %s", repr(target_msg.reactions))
+    #     if current_reaction_count not in self.fib:
+    #         return
+    #     logging.debug("sending reaction notif")
+    #     # maybe only show reactions that haven't been shown before?
+    #     notif = ", ".join(
+    #         f"{name}: {react}" for name, react in message_blob.reactions.items()
+    #     )
+    #     # they're not just our messages, they're our messages at a time on behalf of a specific person
+    #     self.send_message(target_msg.source, f"reactions to '{target_msg.text}': {notif}")
 
     async def handle_message(self, message: Message) -> Response:
         if message.text and message.text.lower() in ("stop", "block"):
@@ -235,7 +222,7 @@ class Whisperer(PayBot):
                 self.blocked.remove(message.source)  # replace
                 return "welcome back"
             return "you weren't blocked"
-        if message.source in self.user_callbacks:
+        if message.text and message.source in self.user_callbacks:
             return await self.user_callbacks.pop(message.source)(message)
         return await super().handle_message(message)
 
@@ -254,8 +241,9 @@ class Whisperer(PayBot):
                 ]
             else:
                 attachments = []
-            self.sent_messages[round(time.time())][follower] = message
-            await self.send_message(follower, f"{name}: {message.text}", attachments)
+            # for each original message timestamp, for each follower, our message's ts
+            # self.sent_messages[round(time.time())][follower] = message
+            await self.send_message(follower, f"{name}: {message.text}", attachments=attachments)
         return None
         # ideally react to the message indicating it was sent?
 
@@ -264,7 +252,6 @@ class Whisperer(PayBot):
         """/follow [number or name]. follow someone"""
         # if not self.paid.get(msg.source):
         #    return "this user is protected. send 0.5 mob to follow"
-
         # if self.user_info[target_number].protected:
         #     self.payments_manager = PaymentsManager()
         #     async def check_payment():
@@ -277,7 +264,7 @@ class Whisperer(PayBot):
         #             self.send(msg.source, f"pay 15 mob to {addr} for that")
         #     asyncio.create_task(check_payment())
         if msg.source not in self.followers[target_number]:
-            await self.send(
+            await self.send_message(
                 target_number, f"{await self.sender_name(msg)} has followed you"
             )
             self.followers[target_number].append(msg.source)
@@ -357,6 +344,7 @@ class Whisperer(PayBot):
         self.followers[target_number].remove(msg.source)
         return f"unfollowed {msg.arg1}"
 
+    @requires_admin
     @takes_number
     async def do_forceinvite(self, msg: Message, target_number: str) -> str:
         if target_number in self.followers[msg.source]:

@@ -11,7 +11,7 @@ import phonenumbers as pn
 from bidict import bidict
 
 from forest import pghelp, utils
-from forest.core import Message, PayBot, Response, run_bot, requires_admin
+from forest.core import Message, PayBot, Response, requires_admin, run_bot
 
 Callback = Callable[[Message], Awaitable[Optional[str]]]
 
@@ -49,17 +49,18 @@ def admin(command: Callable) -> Callable:
     return wrapped_command
 
 
-class WhisprDB(pghelp.SimpleInterface):
-    async def connect_pg(self) -> None:
-        self.pool = await asyncpg.create_pool(self.database)
-        pghelp.pools.append(self.pool)
-
-    create = """CREATE TABLE IF NOT EXISTS persist (key TEXT, content JSON);"""
+PersistExpr = pghelp.PGExpressions(
+    table="persist",
+    create_table="CREATE TABLE IF NOT EXISTS persist (key TEXT, content JSON);",
+    read="SELECT content FROM persist WHERE key=$1;",
+    write="INSERT INTO persist (key, content) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET key=$1, content=$2",
+)
 
 
 class Whisperer(PayBot):
     def __init__(self, bot_number: Optional[str] = None) -> None:
         self.paid: dict[str, bool] = {}
+        # self.db = pghelp.PGInterface(PersistExprs, utils.get_secret("DATABASE_URL"))
         self.db = pghelp.SimpleInterface(utils.get_secret("DATABASE_URL"))
         self.user_callbacks: dict[str, Callback] = {}
         # ...messages[timestamp][user] = msg
@@ -70,6 +71,7 @@ class Whisperer(PayBot):
 
     async def start_process(self) -> None:
         async with self.db.get_connection() as conn:
+            logging.info("got conn")
             # self.user_names: dict = cast(bidict, {})
             if utils.get_secret("MIGRATE"):
                 await conn.execute(
@@ -92,12 +94,15 @@ class Whisperer(PayBot):
                 await conn.fetchval("SELECT content FROM persist WHERE key='blocked';")
                 or []
             )
+        # self.user_names = bidict()
+        # self.followers = defaultdict(list)
+        # self.blocked = set()
         logging.info("starting")
         await super().start_process()
 
     async def async_shutdown(self, *_: Any, wait: bool = False) -> None:
-        conn = self.db.get_connection()
-        try:
+        async with self.db.get_connection() as conn:
+            logging.info(conn)
             vals = {
                 "user_names": dict(self.user_names),
                 "followers": dict(self.followers),
@@ -107,13 +112,11 @@ class Whisperer(PayBot):
                 logging.info("inserting %s, %s", key, content)
                 # this blocks?
                 await conn.execute(
-                    "INSERT INTO persist (key, content) VALUES ($1, $2)",# ON CONFLICT (key) DO UPDATE SET key=$1, content=$2;
+                    "INSERT INTO persist (key, content) VALUES ($1, $2)",  # ON CONFLICT (key) DO UPDATE SET key=$1, content=$2;
                     key,
                     content,
                 )
                 logging.info("inserted %s", key)
-        finally:
-            conn.close()
         await super().async_shutdown(wait=wait)
 
     async def sender_name(self, msg: Message) -> str:
@@ -250,7 +253,9 @@ class Whisperer(PayBot):
                 attachments = []
             # for each original message timestamp, for each follower, our message's ts
             # self.sent_messages[round(time.time())][follower] = message
-            await self.send_message(follower, f"{name}: {message.text}", attachments=attachments)
+            await self.send_message(
+                follower, f"{name}: {message.text}", attachments=attachments
+            )
         return None
         # ideally react to the message indicating it was sent?
 

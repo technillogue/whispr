@@ -1,5 +1,5 @@
 #!/usr/bin/python3.9
-from contextlib import asynccontextmanager 
+from contextlib import asynccontextmanager
 from typing import (
     Optional,
     Any,
@@ -104,7 +104,6 @@ class Message:
 Callback = Callable[[Message], Optional[str]]
 
 
-
 class SimpleInterface:
     def __init__(self, database: str) -> None:
         self.database = database
@@ -118,9 +117,11 @@ class SimpleInterface:
         async with self.pool.acquire() as conn:
             yield conn
 
+
 class WhisprDB(SimpleInterface):
     def __init__(self, database: str) -> None:
         self.database = database
+
     async def connect_pg(self) -> None:
         self.pool = await asyncpg.create_pool(self.database)
         pools.append(self.pool)
@@ -131,8 +132,6 @@ class WhisprDB(SimpleInterface):
     async def get_name(self, number: str) -> str:
         with self.pool.acquire() as conn:
             return conn.fetchval("SELECT name FROM whispr_user WHERE number=$1", number)
-
-    async def set_name
 
 
 class WhispererBase:
@@ -336,7 +335,7 @@ class WhispererBase:
             if message.reactions
         ]
         sum(reaction_counts) / len(reaction_counts)
-        # if count > 
+        # if count >
         if count not in self.fib:
             return
 

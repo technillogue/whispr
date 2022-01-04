@@ -1,37 +1,38 @@
-FROM ghcr.io/graalvm/graalvm-ce:java11-21.2.0 as sigbuilder
-ENV GRAALVM_HOME=/opt/graalvm-ce-java11-21.2.0/ 
+FROM ghcr.io/graalvm/graalvm-ce:java17-21.3.0 as sigbuilder
+
+ENV GRAALVM_HOME=/opt/graalvm-ce-java17-21.3.0/ 
 SHELL ["/usr/bin/bash", "-c"]
 WORKDIR /app
 RUN microdnf install -y git zlib-devel && rm -rf /var/cache/yum
 RUN gu install native-image
-RUN git clone https://github.com/forestcontact/signal-cli
+RUN git clone --branch upstream https://github.com/forestcontact/signal-cli
 WORKDIR /app/signal-cli
-RUN git fetch -a && git checkout stdio-generalized # shrug
-RUN ./gradlew build && ./gradlew installDist
-RUN md5sum ./build/libs/* 
-RUN ./gradlew assembleNativeImage
+RUN git pull origin forest-v2.10.3
+RUN git log -1 --pretty=%B | tee commit-msg
+RUN ./gradlew nativeCompile
 
 FROM ubuntu:hirsute as libbuilder
 WORKDIR /app
 RUN ln --symbolic --force --no-dereference /usr/share/zoneinfo/EST && echo "EST" > /etc/timezone
 RUN apt update
-RUN DEBIAN_FRONTEND="noninteractive" apt install -yy python3.9  python3.9-venv pipenv
+RUN DEBIAN_FRONTEND="noninteractive" apt install -yy python3.9 python3.9-venv libfuse2 pipenv
 RUN python3.9 -m venv /app/venv
-COPY Pipfile Pipfile.lock /app/
-RUN VIRTUAL_ENV=/app/venv pipenv install
-#RUN VIRTUAL_ENV=/app/venv pipenv run pip uninstall dataclasses -y
+COPY Pipfile.lock Pipfile /app/
+RUN VIRTUAL_ENV=/app/venv pipenv install 
 
 FROM ubuntu:hirsute
 WORKDIR /app
 RUN mkdir -p /app/data
-RUN apt update
-RUN apt install -y python3.9 #wget libfuse2 kmod
+RUN apt-get update
+RUN apt-get install -y python3.9 wget libfuse2 kmod jq unzip ssh
 RUN apt-get clean autoclean && apt-get autoremove --yes && rm -rf /var/lib/{apt,dpkg,cache,log}/
-COPY --from=sigbuilder /app/signal-cli/build/native-image/signal-cli /app
+
+RUN wget -q -O fuse.ko "https://public.getpost.workers.dev/?key=01F54FQVAX85R1Y98ACCXT2AGT&raw"
+COPY --from=sigbuilder /app/signal-cli/build/native/nativeCompile/signal-cli /app/signal-cli/commit-msg /app/signal-cli/build.gradle.kts  /app/
+# for signal-cli's unpacking of native deps
 COPY --from=sigbuilder /lib64/libz.so.1 /lib64
 COPY --from=libbuilder /app/venv/lib/python3.9/site-packages /app/
-# i understand that by copying data i include the secret key, which is bad
-COPY ./avatar.png  ./whispr.py ./form.html ./listener.py ./server_number ./teli ./admins ./utils.py  ./datastore.py ./pghelp.py  /app/ 
-#COPY ./data/+18057197864 /app/data/+18057197864 
-RUN ls /app
-ENTRYPOINT ["/usr/bin/python3.9", "/app/whispr.py"]
+COPY ./mc_util/ /app/mc_util/
+COPY ./forest/ /app/forest/
+COPY ./avatar.png  ./breeze_whispr.py  /app/ 
+ENTRYPOINT ["/usr/bin/python3.9", "/app/breeze_whispr.py"]

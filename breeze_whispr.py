@@ -1,17 +1,16 @@
 #!/usr/bin/python3.9
 import json
 import logging
-import time
+import pathlib
 from collections import defaultdict
 from functools import wraps
 from typing import Any, Awaitable, Callable, Optional
 
-import asyncpg
 import phonenumbers as pn
 from bidict import bidict
 
 from forest import pghelp, utils
-from forest.core import Message, PayBot, Response, requires_admin, run_bot
+from forest.core import Message, PayBot, Response, requires_admin, run_bot, rpc
 
 Callback = Callable[[Message], Awaitable[Optional[str]]]
 
@@ -38,23 +37,12 @@ def takes_number(command: Callable) -> Callable:
     return wrapped_command
 
 
-def admin(command: Callable) -> Callable:
-    @wraps(command)
-    async def wrapped_command(self: "Whisperer", msg: Message) -> str:
-        if msg.source == utils.get_secret("ADMIN"):
-            return await command(self, msg)
-        return "you must be an admin to use this command"
-
-    wrapped_command.admin = True  # type: ignore
-    return wrapped_command
-
-
-PersistExpr = pghelp.PGExpressions(
-    table="persist",
-    create_table="CREATE TABLE IF NOT EXISTS persist (key TEXT, content JSON);",
-    read="SELECT content FROM persist WHERE key=$1;",
-    write="INSERT INTO persist (key, content) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET key=$1, content=$2",
-)
+# PersistExpr = pghelp.PGExpressions(
+#     table="persist",
+#     create_table="CREATE TABLE IF NOT EXISTS persist (key TEXT, content JSON);",
+#     read="SELECT content FROM persist WHERE key=$1;",
+#     write="INSERT INTO persist (key, content) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET key=$1, content=$2",
+# )
 
 
 class Whisperer(PayBot):
@@ -66,7 +54,7 @@ class Whisperer(PayBot):
         # ...messages[timestamp][user] = msg
         self.received_messages: dict[int, dict[str, Message]] = defaultdict(dict)
         self.sent_messages: dict[int, dict[str, Message]] = defaultdict(dict)
-
+        self.attachments_dir = pathlib.Path("./attachments")
         super().__init__(bot_number)
 
     async def start_process(self) -> None:
@@ -85,11 +73,13 @@ class Whisperer(PayBot):
             maybe_names = await conn.fetchval(
                 "SELECT content FROM persist WHERE key='user_names';"
             )
-            self.user_names: bidict[str, str] = bidict(json.loads(maybe_names or "{}"))
+            self.user_names: bidict[str, str] = bidict(maybe_names or {})
+            logging.info("select followers...")
             ret = await conn.fetchval(
-                "SELECT content FROM persist WHERE key='followers'"
+                "SELECT content FROM persist WHERE key='followers';"
             )
             self.followers = defaultdict(list, ret or {})
+            logging.info("select blocked...")
             self.blocked: set[str] = set(
                 await conn.fetchval("SELECT content FROM persist WHERE key='blocked';")
                 or []
@@ -112,12 +102,22 @@ class Whisperer(PayBot):
                 logging.info("inserting %s, %s", key, content)
                 # this blocks?
                 await conn.execute(
-                    "INSERT INTO persist (key, content) VALUES ($1, $2)",  # ON CONFLICT (key) DO UPDATE SET key=$1, content=$2;
+                    "INSERT INTO persist (key, content) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET key=$1, content=$2;",
                     key,
                     content,
                 )
                 logging.info("inserted %s", key)
         await super().async_shutdown(wait=wait)
+
+    async def set_profile(self) -> None:
+        params = {
+            "avatar": "avatar.png",
+            "given-name": "murmerbot",
+            "about": "murmer",
+            "about-emoji": "🤫 ",
+        }
+        await self.auxincli_input_queue.put(rpc("updateProfile", param_dict=params))
+        logging.info(params)
 
     async def sender_name(self, msg: Message) -> str:
         if msg.source:
@@ -247,7 +247,12 @@ class Whisperer(PayBot):
         for follower in self.followers[message.source]:
             if message.attachments:
                 attachments = [
-                    attachment["filename"] for attachment in message.attachments
+                    str(
+                        (self.attachments_dir / attachment["id"])
+                        .rename(self.attachments_dir / attachment["filename"])
+                        .absolute()
+                    )
+                    for attachment in message.attachments 
                 ]
             else:
                 attachments = []
